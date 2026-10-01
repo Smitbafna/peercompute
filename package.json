@@ -1,0 +1,13 @@
+{
+  "name": "peercompute",
+  "private": true,
+  "workspaces": {
+    "packages": ["frontend/", "signaling-server/", "shared/"]
+  },
+  "scripts": {
+    "dev": "npm run -w frontend dev & npm run -w signaling-server dev",
+    "build": "npm run -w frontend build & npm run -w signaling-server build",
+    "typecheck": "npm run -w frontend typecheck & npm run -w signaling-server typecheck",
+    "test": "npm run -w frontend test & npm run -w signaling-server test"
+  }
+}
