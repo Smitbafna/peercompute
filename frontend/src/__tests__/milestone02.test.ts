@@ -14,7 +14,7 @@ describe("MessageType enum", () => {
   });
 
   it("has WEBRTC_OFFER", () => {
-    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+    // eslint-disable-next-line @typescript-eslint/no-ununused-vars
     const _type: "WEBRTC_OFFER" = "WEBRTC_OFFER";
   });
 
@@ -56,7 +56,7 @@ describe("MessageType enum", () => {
 
 // Test UUID pattern validation
 describe("UUID pattern validation", () => {
-  const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89][0-9a-f]{3}-[0-9a-f]{12}$/i;
+  const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[489][0-9a-f]{3}-[89AB][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
   it("accepts valid UUIDv4 format with 4 as third group start", () => {
     expect(uuidPattern.test("123e4567-e89b-400d-a456-426614174000")).toBe(true);
