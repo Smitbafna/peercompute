@@ -12,6 +12,11 @@ export enum MessageType {
   // Registration messages
   CoordinatorRegister = "COORDINATOR_REGISTER",
   WorkerRegister = "WORKER_REGISTER",
+  RegistrationSuccess = "REGISTRATION_SUCCESS",
+
+  // Discovery messages (Milestone 05)
+  WorkerDiscoveryRequest = "WORKER_DISCOVERY_REQUEST",
+  WorkerDiscoveryResponse = "WORKER_DISCOVERY_RESPONSE",
 
   // WebRTC signaling messages
   WebrtcOffer = "WEBRTC_OFFER",
@@ -35,6 +40,12 @@ export interface BaseMessage {
   timestamp: number;
 }
 
+/** Alias retained for backward compatibility with validators.ts and existing code. */
+export type BaseMessageFields = BaseMessage;
+
+/** Server-originated message (clientId is optional). */
+export interface ServerMessage extends BaseMessage {}
+
 // --- Client-id message (includes clientId for client-originated messages) ---
 
 export interface ClientMessage extends BaseMessage {
@@ -52,6 +63,31 @@ export interface WorkerRegisterMsg extends ClientMessage {
   type: MessageType.WorkerRegister;
   role: "worker";
   capabilities: string[];
+}
+
+/** Success response sent by the server after a client registers. */
+export interface RegistrationSuccessMsg extends BaseMessage {
+  type: MessageType.RegistrationSuccess;
+  clientId: string;
+  role: "coordinator" | "worker";
+}
+
+// --- Discovery messages (Milestone 05) ---
+
+export interface PeerInfo {
+  clientId: string;
+  role: "coordinator" | "worker";
+}
+
+/** A coordinator sends this to request the list of registered workers. */
+export interface WorkerDiscoveryRequestMsg extends ClientMessage {
+  type: MessageType.WorkerDiscoveryRequest;
+}
+
+/** The server sends this (in response or as a push) to report available workers. */
+export interface WorkerDiscoveryResponseMsg extends BaseMessage {
+  type: MessageType.WorkerDiscoveryResponse;
+  workers: PeerInfo[];
 }
 
 // --- WebRTC signaling messages ---
@@ -122,6 +158,9 @@ export interface DisconnectMsg extends BaseMessage {
 export type AllMessages =
   | CoordinatorRegisterMsg
   | WorkerRegisterMsg
+  | RegistrationSuccessMsg
+  | WorkerDiscoveryRequestMsg
+  | WorkerDiscoveryResponseMsg
   | WebrtcOfferMsg
   | WebrtcAnswerMsg
   | WebrtcIceCandidateMsg
@@ -133,42 +172,60 @@ export type AllMessages =
 
 // Type guards
 
-export function isCoordinatorRegisterMsg(msg: AllMessages): msg is CoordinatorRegisterMsg {
+export function isCoordinatorRegisterMsg(msg: BaseMessage): msg is CoordinatorRegisterMsg {
   return msg.type === MessageType.CoordinatorRegister;
 }
 
-export function isWorkerRegisterMsg(msg: AllMessages): msg is WorkerRegisterMsg {
+export function isWorkerRegisterMsg(msg: BaseMessage): msg is WorkerRegisterMsg {
   return msg.type === MessageType.WorkerRegister;
 }
 
-export function isWebrtcOfferMsg(msg: AllMessages): msg is WebrtcOfferMsg {
+export function isRegistrationSuccessMsg(
+  msg: BaseMessage
+): msg is RegistrationSuccessMsg {
+  return msg.type === MessageType.RegistrationSuccess;
+}
+
+export function isWorkerDiscoveryRequestMsg(
+  msg: BaseMessage
+): msg is WorkerDiscoveryRequestMsg {
+  return msg.type === MessageType.WorkerDiscoveryRequest;
+}
+
+export function isWorkerDiscoveryResponseMsg(
+  msg: BaseMessage
+): msg is WorkerDiscoveryResponseMsg {
+  return msg.type === MessageType.WorkerDiscoveryResponse;
+}
+
+export function isWebrtcOfferMsg(msg: BaseMessage): msg is WebrtcOfferMsg {
   return msg.type === MessageType.WebrtcOffer;
 }
 
-export function isWebrtcAnswerMsg(msg: AllMessages): msg is WebrtcAnswerMsg {
+export function isWebrtcAnswerMsg(msg: BaseMessage): msg is WebrtcAnswerMsg {
   return msg.type === MessageType.WebrtcAnswer;
 }
 
-export function isWebrtcIceCandidateMsg(msg: AllMessages): msg is WebrtcIceCandidateMsg {
+export function isWebrtcIceCandidateMsg(msg: BaseMessage): msg is WebrtcIceCandidateMsg {
   return msg.type === MessageType.WebrtcIceCandidate;
 }
 
-export function isTaskAssignMsg(msg: AllMessages): msg is TaskAssignMsg {
+export function isTaskAssignMsg(msg: BaseMessage): msg is TaskAssignMsg {
   return msg.type === MessageType.TaskAssign;
 }
 
-export function isTaskResultMsg(msg: AllMessages): msg is TaskResultMsg {
+export function isTaskResultMsg(msg: BaseMessage): msg is TaskResultMsg {
   return msg.type === MessageType.TaskResult;
 }
 
-export function isTaskProgressMsg(msg: AllMessages): msg is TaskProgressMsg {
+export function isTaskProgressMsg(msg: BaseMessage): msg is TaskProgressMsg {
   return msg.type === MessageType.TaskProgress;
 }
 
-export function isErrorMsg(msg: AllMessages): msg is ErrorMsg {
+export function isErrorMsg(msg: BaseMessage): msg is ErrorMsg {
   return msg.type === MessageType.Error;
 }
 
-export function isDisconnectMsg(msg: AllMessages): msg is DisconnectMsg {
+export function isDisconnectMsg(msg: BaseMessage): msg is DisconnectMsg {
   return msg.type === MessageType.Disconnect;
 }

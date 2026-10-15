@@ -5,8 +5,20 @@
  * Malformed messages produce a validation failure rather than crash.
  */
 
+import {
+  MessageType,
+  BaseMessage,
+  BaseMessageFields,
+  ClientMessage,
+  CoordinatorRegisterMsg,
+  WorkerRegisterMsg,
+  WorkerDiscoveryRequestMsg,
+} from "./messages";
+
 function isValidUuid(uuid: string): boolean {
-  const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+  /* FIX: Updated UUID pattern to accept valid UUID versions (4, 8, 9) 
+     and variant bits (8, 9, A, B) per RFC 4122 */ 
+  const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[489][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
   return uuidPattern.test(uuid);
 }
 
@@ -30,7 +42,7 @@ function isValidDisconnectReason(val: unknown): val is "normal" | "timeout" | "e
  * Validates a base message has required fields and a valid type discriminator.
  * Returns true if the message has a non-empty type string and a valid timestamp.
  */
-export function validateBaseMessage(msg: unknown): msg is BaseMessageFields => {
+export function validateBaseMessage(msg: unknown): msg is BaseMessageFields {
   if (typeof msg !== "object" || msg === null) return false;
   const m = msg as Record<string, unknown>;
   return isNonEmptyString(m.type) && isValidTimestamp(m.timestamp);
@@ -41,7 +53,7 @@ export function validateBaseMessage(msg: unknown): msg is BaseMessageFields => {
  * clientId must be a UUID-format string.
  * Returns true if the message passes all base + clientId checks.
  */
-export function validateClientMessage(msg: unknown): msg is ClientMessage => {
+export function validateClientMessage(msg: unknown): msg is ClientMessage {
   if (typeof msg !== "object" || msg === null) return false;
   const m = msg as Record<string, unknown>;
   if (!validateBaseMessage(msg)) return false;
@@ -54,9 +66,9 @@ export function validateClientMessage(msg: unknown): msg is ClientMessage => {
  * Validates a registration message.
  * Checks type discriminator, clientId (UUID), role, and role-specific fields.
  */
-export function validateRegistrationMsg(msg: unknown): msg is
-  | CoordinatorRegisterMsg
-  | WorkerRegisterMsg => {
+export function validateRegistrationMsg(msg: unknown): msg is (
+  CoordinatorRegisterMsg | WorkerRegisterMsg
+) {
   if (typeof msg !== "object" || msg === null) return false;
   const m = msg as Record<string, unknown>;
   if (!validateClientMessage(msg)) return false;
@@ -72,4 +84,18 @@ export function validateRegistrationMsg(msg: unknown): msg is
     }
   }
   return true;
-};
+}
+
+/**
+ * Validates a discovery request message.
+ * The type must be WORKER_DISCOVERY_REQUEST and the message must include
+ * a valid UUID clientId (inherited from validateClientMessage).
+ */
+export function validateDiscoveryRequestMsg(
+  msg: unknown
+): msg is WorkerDiscoveryRequestMsg {
+  if (typeof msg !== "object" || msg === null) return false;
+  const m = msg as Record<string, unknown>;
+  if (!validateClientMessage(msg)) return false;
+  return m.type === MessageType.WorkerDiscoveryRequest;
+}

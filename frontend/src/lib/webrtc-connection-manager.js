@@ -58,7 +58,7 @@ export class WebRTCConnectionManager extends EventEmitter {
                     type: "WEBRTC_ICE_CANDIDATE",
                     clientId: this.options.clientId,
                     senderId: this.options.clientId,
-                    receiverId: "",
+                    receiverId: this.options.receiverId || "",
                     candidate: candidateEvent.candidate,
                     sdpMid: candidateEvent.candidate.sdpMid,
                     sdpMLineIndex: candidateEvent.candidate.sdpMLineIndex,
@@ -128,6 +128,9 @@ export class WebRTCConnectionManager extends EventEmitter {
         catch (error) {
             console.error("Failed to add remote ICE candidate:", error);
         }
+    }
+    send(message) {
+        this.options.send(message);
     }
     addIceCandidate(candidate) {
         if (!this.peerConnection)
