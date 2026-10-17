@@ -204,47 +204,101 @@ describe('Signaling Server - Registration', () => {
     
     ws.close();
   });
-  it('should handle worker discovery request', async () => {
-    const port = (globalThis as any).testPort;
-    const ws = new WebSocket(`ws://localhost:${port}`);
-    
-    await new Promise<void>((resolve) => {
-      const sendRegistration = () => {
-        ws.send(JSON.stringify({
-          type: 'COORDINATOR_REGISTER',
-          clientId: 'discovery-coordinator',
-          role: 'coordinator',
-          timestamp: Date.now(),
-        }));
-      };
-      if (ws.readyState === ws.OPEN) {
-        sendRegistration();
-      } else {
-        ws.on('open', sendRegistration);
-      }
-      
-      ws.on('message', (data: string) => {
-        const msg = JSON.parse(data);
-        if (msg.type === 'REGISTRATION_SUCCESS') {
-          // Now send discovery request
-          ws.send(JSON.stringify({
-            type: 'WORKER_DISCOVERY_REQUEST',
-            clientId: 'discovery-coordinator',
-            timestamp: Date.now(),
-          }));
-        }
-      });
-      
-      ws.on('message', (data: string) => {
-        const msg = JSON.parse(data);
-        if (msg.type === 'WORKER_DISCOVERY_RESPONSE') {
-          // Server should respond with available workers list
-          expect(Array.isArray(msg.workers)).toBe(true);
-          resolve();
-        }
-      });
+it("should discover registered workers", async () => {
+  const port = (globalThis as any).testPort;
+
+  const connect = () =>
+    new Promise<WebSocket>((resolve, reject) => {
+      const ws = new WebSocket(`ws://localhost:${port}`);
+      ws.once("open", () => resolve(ws));
+      ws.once("error", reject);
     });
-    
-    ws.close();
-  });
+
+  const waitForMessage = (
+    ws: WebSocket,
+    predicate: (msg: any) => boolean
+  ) =>
+    new Promise<any>((resolve, reject) => {
+      const timeout = setTimeout(
+        () => reject(new Error("Timed out waiting for message")),
+        3000
+      );
+
+      const onMessage = (data: WebSocket.RawData) => {
+        let msg: any;
+        try {
+          msg = JSON.parse(data.toString());
+        } catch {
+          return;
+        }
+
+        if (msg.type === "ERROR") {
+          clearTimeout(timeout);
+          ws.off("message", onMessage);
+          reject(new Error(`${msg.code}: ${msg.message}`));
+          return;
+        }
+
+        if (predicate(msg)) {
+          clearTimeout(timeout);
+          ws.off("message", onMessage);
+          resolve(msg);
+        }
+      };
+
+      ws.on("message", onMessage);
+    });
+
+  const worker = await connect();
+  const coordinator = await connect();
+
+  try {
+    const workerSuccess = waitForMessage(
+      worker,
+      (msg) => msg.type === "REGISTRATION_SUCCESS"
+    );
+
+    worker.send(JSON.stringify({
+      type: "WORKER_REGISTER",
+      clientId: "discovery-worker-01",
+      role: "worker",
+      capabilities: ["image-processing"],
+      timestamp: Date.now(),
+    }));
+
+    await workerSuccess;
+
+    const coordinatorSuccess = waitForMessage(
+      coordinator,
+      (msg) => msg.type === "REGISTRATION_SUCCESS"
+    );
+
+    const initialDiscovery = waitForMessage(
+      coordinator,
+      (msg) =>
+        msg.type === "WORKER_DISCOVERY_RESPONSE" &&
+        msg.workers.some(
+          (w: any) => w.clientId === "discovery-worker-01"
+        )
+    );
+
+    coordinator.send(JSON.stringify({
+      type: "COORDINATOR_REGISTER",
+      clientId: "discovery-coordinator-01",
+      role: "coordinator",
+      timestamp: Date.now(),
+    }));
+
+    await coordinatorSuccess;
+    const response = await initialDiscovery;
+
+    expect(response.workers).toContainEqual({
+      clientId: "discovery-worker-01",
+      role: "worker",
+    });
+  } finally {
+    worker.close();
+    coordinator.close();
+  }
+});
 });

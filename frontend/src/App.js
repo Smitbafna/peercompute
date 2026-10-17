@@ -171,12 +171,13 @@ function App() {
         };
         const newManager = new WebRTCConnectionManager(options);
         managersRef.current.set(receiverId, newManager);
-        newManager.on("connected", () => setConnectionState("connected to " + receiverId));
-        newManager.on("disconnected", () => setConnectionState("disconnected"));
-        newManager.on("closed", () => {
+        newManager.on("connect", () => setConnectionState("connected to " + receiverId));
+        newManager.on("statechange", () => setConnectionState("disconnected"));
+        newManager.on("close", () => {
             setConnectionState("closed");
             managersRef.current.delete(receiverId);
         });
+        newManager.on("failed", () => setConnectionState("failed"));
         try {
             const offer = await newManager.createOffer();
             if (wsRef.current?.readyState === WebSocket.OPEN) {

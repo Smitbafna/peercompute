@@ -1,5 +1,10 @@
 import { WebSocket } from "ws";
-import { MessageType } from "peercompute-shared";
+import {
+  MessageType,
+  WebrtcOfferMsg,
+  WebrtcAnswerMsg,
+  WebrtcIceCandidateMsg,
+} from "peercompute-shared";
 
 export interface RegisteredClient {
   clientId: string;
@@ -113,13 +118,6 @@ export function handleRegistration(message: any, ws: WebSocket): void {
   const existing = clients.get(clientId);
   if (existing) {
     sendError(ws, "DUPLICATE_ID", "Client ID " + clientId + " is already registered");
-    if (existing.ws !== ws && existing.ws.readyState === existing.ws.OPEN) {
-      sendError(
-        existing.ws,
-        "DUPLICATE_ID",
-        "Client ID " + clientId + " is already registered. New registration rejected."
-      );
-    }
     return;
   }
 
@@ -195,13 +193,30 @@ export function handleDiscoveryRequest(
 }
 
 export function handleSignalingMessage(
-  message: any,
+  message: WebrtcOfferMsg | WebrtcAnswerMsg | WebrtcIceCandidateMsg,
   sender: RegisteredClient,
-  ws: WebSocket
+  ws: WebSocket,
 ): void {
-  const { receiverId } = message || {};
-  if (!receiverId) {
+  const { receiverId, type } = message;
+
+  if (!receiverId || typeof receiverId !== "string" || receiverId.trim() === "") {
     sendError(ws, "MISSING_RECIPIENT", "receiverId is required for signaling messages");
+    return;
+  }
+  if (type !== MessageType.WebrtcOffer && type !== MessageType.WebrtcAnswer && type !== MessageType.WebrtcIceCandidate) {
+    sendError(ws, "INVALID_MESSAGE_TYPE", "Unsupported WebRTC message type");
+    return;
+  }
+  if (!message.senderId || typeof message.senderId !== "string" || message.senderId.trim() === "") {
+    sendError(ws, "INVALID_SENDER", "senderId is required");
+    return;
+  }
+  if (message.senderId !== sender.clientId) {
+    sendError(ws, "FORBIDDEN", "Signaling sender identity mismatch");
+    return;
+  }
+  if (!receiverId || typeof receiverId !== "string" || receiverId.trim() === "") {
+    sendError(ws, "INVALID_RECIPIENT", "receiverId must be a non-empty string");
     return;
   }
   const recipient = clients.get(receiverId);
@@ -213,12 +228,13 @@ export function handleSignalingMessage(
     sendError(ws, "RECIPIENT_OFFLINE", "Recipient " + receiverId + " is currently offline");
     return;
   }
+
   try {
     recipient.ws.send(JSON.stringify(message));
-    console.log(" signaling message sent from " + sender.clientId + " to " + receiverId);
+    console.log("WebRTC signaling message sent from " + sender.clientId + " to " + receiverId);
   } catch (error) {
-    console.error("Failed to send message to recipient:", error);
-    sendError(ws, "SEND_FAILED", "Failed to send message to recipient");
+    console.error("Failed to send WebRTC signaling message to recipient:", error);
+    sendError(ws, "SEND_FAILED", "Failed to send WebRTC signaling message to recipient");
   }
 }
 
@@ -292,24 +308,14 @@ export function handleMessage(message: any, ws: WebSocket): void {
   if (
     msgType === MessageType.WebrtcOffer ||
     msgType === MessageType.WebrtcAnswer ||
-    msgType === MessageType.WebrtcIceCandidate ||
-    msgType === "WEBRTC_OFFER" ||
-    msgType === "WEBRTC_ANSWER" ||
-    msgType === "WEBRTC_ICE_CANDIDATE"
+    msgType === MessageType.WebrtcIceCandidate
   ) {
-    handleSignalingMessage(message, client, ws);
-    return;
-  }
-
-  if (
-    msgType === MessageType.TaskAssign ||
-    msgType === MessageType.TaskResult ||
-    msgType === MessageType.TaskProgress ||
-    msgType === "TASK_ASSIGN" ||
-    msgType === "TASK_RESULT" ||
-    msgType === "TASK_PROGRESS"
-  ) {
-    sendError(ws, "NOT_IMPLEMENTED", msgType + " is not yet implemented");
+    const webrtcMsg = msgType === MessageType.WebrtcOffer
+      ? (message as WebrtcOfferMsg)
+      : msgType === MessageType.WebrtcAnswer
+        ? (message as WebrtcAnswerMsg)
+        : (message as WebrtcIceCandidateMsg);
+    handleSignalingMessage(webrtcMsg, client, ws);
     return;
   }
 

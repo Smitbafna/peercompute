@@ -1,15 +1,20 @@
 /**
- * WebRTC Connection Manager for PeerCompute Milestone 04
+ * WebRTC Connection Manager for PeerCompute Milestone 06
  */
+import {
+  MessageType,
+} from "peercompute-shared";
+
 export interface BaseMessage {
   type: string;
   timestamp: number;
 }
 export interface WebrtcIceMsg extends BaseMessage {
   type: "WEBRTC_ICE_CANDIDATE";
+  clientId: string;
   senderId: string;
   receiverId: string;
-  candidate: RTCIceCandidate;
+  candidate: RTCIceCandidateInit;
   sdpMid?: string;
   sdpMLineIndex?: number;
 }
@@ -20,7 +25,7 @@ export type ConnectionState =
   | "failed"
   | "closed";
 export interface IcefEvent {
-  candidate: RTCIceCandidate;
+  candidate: RTCIceCandidateInit;
   sdpMid?: string;
   sdpMLineIndex?: number;
 }
@@ -47,83 +52,192 @@ export interface ConnectionManagerOptions {
   iceServers?: RTCIceServer[];
   receiverId?: string;
 }
+
+export interface DataChannelEventMap {
+  connect: () => void;
+  message: (data: string) => void;
+  close: () => void;
+  statechange: () => void;
+  failed: (reason: string) => void;
+}
+
 export class EventEmitter {
-  private handlers: Map<string, Function[]> = new Map;
-  on(event: string, handler: Function) {
+  private handlers: Map<string, Set<(...args: unknown[]) => void>> = new Map();
+
+  on<TEvent extends string>(
+    event: TEvent,
+    handler: (...args: unknown[]) => void,
+  ): void {
     if (!this.handlers.has(event)) {
-      this.handlers.set(event, []);
+      this.handlers.set(
+        event,
+        new Set<(...args: unknown[]) => void>(),
+      );
     }
-    this.handlers.get(event)!.push(handler);
+    this.handlers.get(event)!.add(handler);
   }
-  off(event: string, handler: Function) {
+
+  off<TEvent extends string>(
+    event: TEvent,
+    handler: (...args: unknown[]) => void,
+  ): void {
     const handlers = this.handlers.get(event);
-    if (handlers) {
-      const idx = handlers.indexOf(handler);
-      if (idx !== -1) {
-        handlers.splice(idx, 1);
-      }
+    if (!handlers) return;
+    handlers.delete(handler);
+    if (handlers.size === 0) {
+      this.handlers.delete(event);
     }
   }
-  emit(event: string, ...args: any[]) {
+
+  emit<TEvent extends string>(
+    event: TEvent,
+    ...args: unknown[]
+  ): void {
     const handlers = this.handlers.get(event);
-    if (handlers) {
-      for (const handler of handlers) {
-        handler(...args);
-      }
+    if (!handlers) return;
+    for (const handler of handlers) {
+      handler(...args);
     }
   }
 }
+
 export class WebRTCConnectionManager extends EventEmitter {
   public peerConnection: RTCPeerConnection | null = null;
+  private dataChannel: RTCDataChannel | null = null;
   private candidateBuffer: IcefEvent[] = [];
   private isClosed = false;
-  private remoteDescriptionSettled = false;
+  private isDisconnected = false;
+  private hasSetupRemoteDescription = false;
+  private remoteOpen = false;
+  private messageHandlerAttached = false;
   private options: ConnectionManagerOptions;
+
   constructor(options: ConnectionManagerOptions) {
     super();
     this.options = options;
     const iceServers = options.iceServers || this.defaultIceServers();
     this.peerConnection = new RTCPeerConnection({ iceServers });
     this.setupPeerConnectionHandlers();
+    this.createDataChannel();
   }
+
   private defaultIceServers(): RTCIceServer[] {
-    return [
-      { urls: "stun:stun.l.google.com:19302" },
-    ];
+    return [{ urls: "stun:stun.l.google.com:19302" }];
+  }
+
+  private createDataChannel(): void {
+    if (!this.peerConnection || this.dataChannel) {
+      return;
+    }
+    const dc = this.peerConnection.createDataChannel(
+      "peercompute-test",
+      { ordered: true },
+    );
+    this.dataChannel = dc;
+    this.setupDataChannelHandlers();
+  }
+
+  private setupDataChannelHandlers(): void {
+    if (!this.dataChannel) {
+      return;
+    }
+    this.dataChannel.onopen = () => {
+      this.remoteOpen = true;
+      this.emit("connect");
+    };
+    this.dataChannel.onclose = () => {
+      this.remoteOpen = false;
+      this.emit("close");
+    };
+    this.dataChannel.onmessage = (event: MessageEvent<string>) => {
+      this.emit("message", event.data);
+    };
   }
   getConnectionState(): RTCPeerConnectionState {
-    return this.peerConnection ? this.peerConnection.connectionState : "closed";
+    return this.peerConnection
+      ? this.peerConnection.connectionState
+      : "closed";
   }
+
   getSignalingState(): RTCSignalingState {
-    return this.peerConnection ? this.peerConnection.signalingState : "closed";
+    return this.peerConnection
+      ? this.peerConnection.signalingState
+      : "closed";
   }
-  private setupPeerConnectionHandlers() {
-    if (!this.peerConnection) return;
+  private setupPeerConnectionHandlers(): void {
+    if (!this.peerConnection) {
+      return;
+    }
+
     this.peerConnection.onicecandidate = (event: Event) => {
-      const candidateEvent = event as any;
-      if (candidateEvent.candidate) {
-        const candidateMsg: Record<string, unknown> = {
-          type: "WEBRTC_ICE_CANDIDATE",
-          clientId: this.options.clientId,
-          senderId: this.options.clientId,
-          receiverId: this.options.receiverId || "",
-          candidate: candidateEvent.candidate,
-          sdpMid: candidateEvent.candidate.sdpMid,
-          sdpMLineIndex: candidateEvent.candidate.sdpMLineIndex,
+      const candidateEvent = event as RTCPeerConnectionIceEvent;
+      const candidate = candidateEvent.candidate;
+      if (candidate) {
+        const msg: IcefEvent = {
+          candidate: {
+            candidate: candidate.candidate,
+            sdpMid: candidate.sdpMid || undefined,
+            sdpMLineIndex: candidate.sdpMLineIndex ?? undefined,
+          },
+          sdpMid: candidate.sdpMid || undefined,
+          sdpMLineIndex: candidate.sdpMLineIndex ?? undefined,
         };
-        this.options.send(candidateMsg);
-        this.emit("icef", {
-          candidate: candidateEvent.candidate,
-          sdpMid: candidateEvent.candidate.sdpMid,
-          sdpMLineIndex: candidateEvent.candidate.sdpMLineIndex,
-        });
+        this.candidateBuffer.push(msg);
+        this.options.send(
+          this.serializeIceCandidate(msg, this.options.clientId),
+        );
       } else {
-        this.emit("closed");
+        this.flushBufferedCandidates();
+      }
+    };
+
+    this.peerConnection.onconnectionstatechange = () => {
+      const state = this.peerConnection?.connectionState;
+      this.emit("statechange");
+      if (state === "failed") {
+        this.emit("failed", "Peer connection failed");
+      }
+      if (state === "disconnected" || state === "closed") {
+        this.close();
+      }
+    };
+
+    this.peerConnection.onsignalingstatechange = () => {
+      this.emit("statechange");
+    };
+
+    this.peerConnection.oniceconnectionstatechange = () => {
+      const state = this.peerConnection?.iceConnectionState;
+      if (state === "failed") {
+        this.emit("failed", "ICE connection failed");
+      }
+      if (state === "disconnected" || state === "closed") {
+        this.close();
       }
     };
   }
+
+  private serializeIceCandidate(
+    event: IcefEvent,
+    senderId: string,
+  ): Record<string, unknown> {
+    const candidate = event.candidate as RTCIceCandidateInit;
+    return {
+      type: MessageType.WebrtcIceCandidate,
+      timestamp: Date.now(),
+      clientId: senderId,
+      senderId,
+      receiverId: this.options.receiverId || "",
+      candidate,
+      sdpMid: event.sdpMid,
+      sdpMLineIndex: event.sdpMLineIndex,
+    } as Record<string, unknown>;
+  }
+  /** Create the DataChannel first, then generate the offer. */
   async createOffer(): Promise<RTCSessionDescriptionInit> {
-    if (!this.peerConnection) throw new Error("Peer connection not initialized");
+    if (!this.peerConnection) {
+      throw new Error("Peer connection not initialized");
+    }
     const offer = await this.peerConnection.createOffer({
       offerToReceiveVideo: false,
       offerToReceiveAudio: false,
@@ -132,72 +246,147 @@ export class WebRTCConnectionManager extends EventEmitter {
     this.flushBufferedCandidates();
     return offer;
   }
+  /** Apply a coordinator offer, generate an answer, send it. */
   async createAnswer(remoteDescription: RTCSessionDescriptionInit): Promise<RTCSessionDescriptionInit> {
-    if (!this.peerConnection) throw new Error("Peer connection not initialized");
+    if (!this.peerConnection) {
+      throw new Error("Peer connection not initialized");
+    }
     await this.peerConnection.setRemoteDescription(remoteDescription);
+    this.hasSetupRemoteDescription = true;
     this.flushBufferedCandidates();
     const answer = await this.peerConnection.createAnswer();
     await this.peerConnection.setLocalDescription(answer);
     return answer;
   }
-  async setRemoteDescription(desc: RTCSessionDescriptionInit): Promise<void> {
-    if (!this.peerConnection) throw new Error("Peer connection not initialized");
+
+  /** Apply a remote answer (normally generated by the other side). */
+  async setRemoteDescription(
+    desc: RTCSessionDescriptionInit,
+  ): Promise<void> {
+    if (!this.peerConnection) {
+      throw new Error("Peer connection not initialized");
+    }
     await this.peerConnection.setRemoteDescription(desc);
-    this.remoteDescriptionSettled = true;
+    this.hasSetupRemoteDescription = true;
     this.flushBufferedCandidates();
   }
+
+  /** Send a text message through the DataChannel.
+   * @throws {Error} if the DataChannel is not open.
+   */
+  send(message: string): void {
+    if (!this.dataChannel || this.dataChannel.readyState !== "open") {
+      throw new Error("DataChannel is not open");
+    }
+    this.dataChannel.send(message);
+  }
+
+  /** Close the DataChannel, peer connection, buffered candidates, and listeners. */
   close(): void {
-    if (this.isClosed) return;
+    if (this.isClosed) {
+      return;
+    }
     this.isClosed = true;
+    this.isDisconnected = true;
+
+    if (this.dataChannel) {
+      try {
+        this.dataChannel.close();
+      } catch (error) {
+        console.error("Failed to close DataChannel:", error);
+      }
+      this.dataChannel = null;
+    }
+
     if (this.peerConnection) {
       this.peerConnection.close();
       this.peerConnection = null;
     }
     this.candidateBuffer = [];
-    this.emit("closed");
-  }
-  private flushBufferedCandidates() {
-    while (this.candidateBuffer.length > 0) {
-      const candidate = this.candidateBuffer.shift()!;
-      this.addRemoteFingerprint(candidate.candidate, candidate.sdpMid, candidate.sdpMLineIndex);
-    }
-  }
-  private async addRemoteFingerprint(
-    candidate: RTCIceCandidateInit,
-    sdpMid?: string | undefined,
-    sdpMLineIndex?: number | undefined
-  ): Promise<void> {
-    if (!this.peerConnection) return;
-    try {
-      this.addIceCandidate(candidate);
-    } catch (error) {
-      console.error("Failed to add remote ICE candidate:", error);
-    }
-  }
-  public send(message: Record<string, unknown>): void {
-    this.options.send(message);
+    this.emit("close");
   }
 
-  public addIceCandidate(candidate: RTCIceCandidateInit): void {
-    if (!this.peerConnection) return;
-    this.peerConnection.addIceCandidate(candidate).then(() => {
-      // Candidate added successfully
-    }).catch((error) => {
+  private flushBufferedCandidates(): void {
+    while (this.candidateBuffer.length > 0) {
+      const event = this.candidateBuffer.shift()!;
+      this.applyRemoteIceCandidate(event).catch((error) => {
+        console.error("Failed to apply buffered ICE candidate:", error);
+      });
+    }
+  }
+
+  private async applyRemoteIceCandidate(
+    event: IcefEvent,
+  ): Promise<void> {
+    if (!this.peerConnection) {
+      return;
+    }
+    const candidate =
+      event.candidate as RTCIceCandidateInit | undefined;
+    if (!candidate) {
+      return;
+    }
+    try {
+      await this.peerConnection.addIceCandidate(candidate);
+    } catch (error) {
       console.error("Failed to add ICE candidate:", error);
+    }
+  }
+
+  /** Add a remote ICE candidate, optionally buffered until the remote description is available. */
+  addIceCandidate(candidate: RTCIceCandidateInit): Promise<void> {
+    if (!this.peerConnection) {
+      return Promise.reject(new Error("Peer connection not initialized"));
+    }
+    return this.peerConnection.addIceCandidate(candidate).catch((error) => {
+      console.error("Failed to add ICE candidate:", error);
+      return Promise.reject(error);
     });
   }
+
+  private onConnectBound = (...args: unknown[]): void => {
+    this.emit("connect");
+  };
+
+  private onMessageBound = (data: string, ...args: unknown[]): void => {
+    this.emit("message", data);
+  };
+
+  private onCloseBound = (...args: unknown[]): void => {
+    this.emit("close");
+  };
+
+  private onFailedBound = (reason: string, ...args: unknown[]): void => {
+    this.emit("failed", reason);
+  };
+
+  private onStateChangeBound = (...args: unknown[]): void => {
+    this.emit("statechange");
+  };
+
+  private onConnectionStateChangeBound = (...args: unknown[]): void => {
+    this.emit("statechange");
+  };
+
+  private onIceConnectionStateChangeBound = (...args: unknown[]): void => {
+    this.emit("statechange");
+  };
 }
+
 export function processWebrtcOffer(manager: WebRTCConnectionManager, offerMsg: WebrtcOfferMsg): Promise<void> {
   return manager.setRemoteDescription({ type: "offer" as const, sdp: offerMsg.sdp });
 }
 export function processWebrtcAnswer(manager: WebRTCConnectionManager, answerMsg: WebrtcAnswerMsg): Promise<void> {
   return manager.setRemoteDescription({ type: "answer" as const, sdp: answerMsg.sdp });
 }
-export function processWebrtcIceCandidate(manager: WebRTCConnectionManager, candidateMsg: any): void {
+export function processWebrtcIceCandidate(
+  manager: WebRTCConnectionManager,
+  candidateMsg: WebrtcIceMsg,
+): Promise<void> {
   const iceCandidate: RTCIceCandidateInit = {
-    candidate: candidateMsg.candidate,
-    sdpMid: candidateMsg.sdpMid,
-    sdpMLineIndex: candidateMsg.sdpMLineIndex,
+    candidate: candidateMsg.candidate.candidate,
+    sdpMid: candidateMsg.candidate.sdpMid,
+    sdpMLineIndex: candidateMsg.candidate.sdpMLineIndex,
   };
-  manager.addIceCandidate(iceCandidate);
+  return manager.addIceCandidate(iceCandidate);
 }
