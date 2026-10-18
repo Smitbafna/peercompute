@@ -98,7 +98,8 @@ function App(): React.ReactNode {
       setDiscoveryStatus("Not discovered");
       setWorkers([]);
     };
-    ws.onerror = (err: Event) => setError("WebSocket error: " + (err as any).message);
+    ws.onerror = (err: Event) =>
+    setError("WebSocket error: " + ((err as any).message || "connection failed"));
   }, [isRegistered]);
 
   const handleSignalingMessage = (msg: BaseMessageFields) => {
@@ -170,28 +171,6 @@ function App(): React.ReactNode {
 
   const initiateConnection = useCallback(
     async (receiverId: string) => {
-      const manager = managersRef.current.get(receiverId);
-      if (manager) {
-        try {
-          const offer = await manager.createOffer();
-          if (wsRef.current?.readyState === WebSocket.OPEN) {
-            wsRef.current.send(
-              JSON.stringify({
-                type: MessageType.WebrtcOffer,
-                clientId,
-                senderId: clientId,
-                receiverId,
-                sdp: offer.sdp,
-                timestamp: Date.now(),
-              })
-            );
-          }
-        } catch (err) {
-          setError("Failed to create offer: " + (err as Error).message);
-        }
-        return;
-      }
-
       const options: ConnectionManagerOptions = {
         clientId,
         role: "worker",
@@ -315,13 +294,6 @@ function App(): React.ReactNode {
       </ul>
       <br />
       <span>Errors: <strong>{error || "none"}</strong></span>
-      <button
-        style={{ marginTop: "0.5rem" }}
-        onClick={requestWorkerList}
-        disabled={!isRegistered || role !== "coordinator"}
-      >
-        Request Worker List
-      </button>
     </div>
   );
 
@@ -439,7 +411,7 @@ function App(): React.ReactNode {
       </div>
       {role === "coordinator" && coordinatorSection}
       {role === "worker" && workerSection}
-      {!role && unauthSection}
+      {!isRegistered && unauthSection}
     </div>
   );
 }
