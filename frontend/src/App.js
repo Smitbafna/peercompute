@@ -121,6 +121,23 @@ function App() {
             setRole(msg.role);
             setIsRegistered(true);
             setWorkers([]);
+            // Automatically initiate WebRTC connection after registration
+            if (msg.role === "coordinator") {
+                // Coordinator initiates connection to a worker
+                // We'll use the first discovered worker or a default
+                const workerOptions = managersRef.current.get("worker-1");
+                if (!workerOptions) {
+                    // Request worker list first, then initiate
+                    requestWorkerList();
+                }
+                else {
+                    initiateConnection("worker-1");
+                }
+            }
+            else {
+                // Worker role: connection will be initiated by coordinator
+                setConnectionState("waiting for coordinator");
+            }
             return;
         }
         if (isErrorMsg(msg)) {
@@ -150,6 +167,11 @@ function App() {
         if (isWorkerDiscoveryResponseMsg(msg)) {
             setWorkers(msg.workers || []);
             setDiscoveryStatus(`Available workers: ${msg.workers.length}`);
+            // Auto-initiate WebRTC connection to first worker after discovery
+            if (msg.workers.length > 0 && role === "coordinator") {
+                // Connect to first available worker
+                initiateConnection(msg.workers[0].clientId);
+            }
             return;
         }
     };
@@ -211,13 +233,23 @@ function App() {
         };
         const newManager = new WebRTCConnectionManager(options);
         managersRef.current.set(receiverId, newManager);
-        newManager.on("connect", () => setConnectionState("connected to " + receiverId));
-        newManager.on("statechange", () => setConnectionState("disconnected"));
+        newManager.on("connect", () => {
+            setConnectionState("connected to " + receiverId);
+            setDataChannelState("open");
+        });
+        newManager.on("statechange", () => {
+            setConnectionState("disconnected");
+            setDataChannelState("---");
+        });
         newManager.on("close", () => {
             setConnectionState("closed");
+            setDataChannelState("---");
             managersRef.current.delete(receiverId);
         });
-        newManager.on("failed", () => setConnectionState("failed"));
+        newManager.on("failed", () => {
+            setConnectionState("failed");
+            setDataChannelState("---");
+        });
         try {
             const offer = await newManager.createOffer();
             if (wsRef.current?.readyState === WebSocket.OPEN) {
