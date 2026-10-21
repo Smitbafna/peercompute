@@ -13,6 +13,8 @@ import {
   CoordinatorRegisterMsg,
   WorkerRegisterMsg,
   WorkerDiscoveryRequestMsg,
+  TestMsg,
+  AckMsg,
 } from "./messages";
 
 function isValidUuid(uuid: string): boolean {
@@ -100,4 +102,28 @@ export function validateDiscoveryRequestMsg(
   return m.type === MessageType.WorkerDiscoveryRequest;
 }
 
-/**\n * Validates a test message.\n * Checks type discriminator, clientId (UUID), messageId (UUID), timestamp, and payload.\n */\nexport function validateTestMsg(msg: unknown): msg is TestMsg {\n  if (typeof msg !== "object" || msg === null) return false;\n  const m = msg as Record<string, unknown>;\n  if (!validateClientMessage(msg)) return false;\n  if (!isNonEmptyString(m.messageId)) return false;\n  if (!isValidUuid(m.messageId)) return false;\n  return true;\n}\n\n/**\n * Validates an acknowledgement message.\n * Checks type discriminator, messageId (UUID), and timestamp.\n */\nexport function validateAckMsg(msg: unknown): msg is AckMsg {\n  if (typeof msg !== "object" || msg === null) return false;\n  const m = msg as Record<string, unknown>;\n  if (!validateBaseMessage(msg)) return false;\n  if (!isNonEmptyString(m.messageId)) return false;\n  if (!isValidUuid(m.messageId)) return false;\n  return true;\n}\n
+/**
+ * Validates a test message.
+ * Checks type discriminator, clientId (UUID), messageId (UUID), timestamp, and payload.
+ */
+export function validateTestMsg(msg: unknown): msg is TestMsg {
+  if (typeof msg !== "object" || msg === null) return false;
+  const m = msg as Record<string, unknown>;
+  if (!validateClientMessage(msg)) return false;
+  if (!isNonEmptyString(m.messageId)) return false;
+  if (!isValidUuid(m.messageId)) return false;
+  return true;
+}
+
+/**
+ * Validates an acknowledgement message.
+ * Checks type discriminator, messageId (UUID), and timestamp.
+ */
+export function validateAckMsg(msg: unknown): msg is AckMsg {
+  if (typeof msg !== "object" || msg === null) return false;
+  const m = msg as Record<string, unknown>;
+  if (!validateBaseMessage(msg)) return false;
+  if (!isNonEmptyString(m.messageId)) return false;
+  if (!isValidUuid(m.messageId)) return false;
+  return true;
+}

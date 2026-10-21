@@ -236,10 +236,6 @@ export function isDisconnectMsg(msg: BaseMessage): msg is DisconnectMsg {
   return msg.type === MessageType.Disconnect;
 }
 
-export function isTestMsg(msg: BaseMessage): msg is TestMsg {
-  return msg.type === MessageType.Test;
-}
-
 export function isAckMsg(msg: BaseMessage): msg is AckMsg {
   return msg.type === MessageType.Ack;
 }
@@ -255,13 +251,4 @@ export interface TestMsg extends ClientMessage {
 export interface AckMsg extends BaseMessage {
   type: MessageType.Ack;
   messageId: string; // The messageId being acknowledged
-}
-
-// Type guards
-export function isTestMsg(msg: BaseMessage): msg is TestMsg {
-  return msg.type === MessageType.Test;
-}
-
-export function isAckMsg(msg: BaseMessage): msg is AckMsg {
-  return msg.type === MessageType.Ack;
 }
