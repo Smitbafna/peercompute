@@ -27,6 +27,7 @@ export enum MessageType {
   TaskAssign = "TASK_ASSIGN",
   TaskResult = "TASK_RESULT",
   TaskProgress = "TASK_PROGRESS",
+  TaskFailure = "TASK_FAILURE",
 
   // Test messages (Milestone 07)
   Test = "TEST",
@@ -124,16 +125,21 @@ export interface WebrtcIceCandidateMsg extends ClientMessage {
 export interface TaskAssignMsg extends ClientMessage {
   type: MessageType.TaskAssign;
   taskId: string;
-  jobId: string;
-  taskIndex: number;
-  inputData: unknown;
-  deadline?: number;
+  sampleCount: number;
+  seed: string;
 }
 
 export interface TaskResultMsg extends ClientMessage {
   type: MessageType.TaskResult;
   taskId: string;
-  result: number;
+  pointsInside: number;
+  totalSamples: number;
+}
+
+export interface TaskFailureMsg extends ClientMessage {
+  type: MessageType.TaskFailure;
+  taskId: string;
+  errorMessage: string;
 }
 
 export interface TaskProgressMsg extends ClientMessage {
@@ -170,6 +176,7 @@ export type AllMessages =
   | WebrtcIceCandidateMsg
   | TaskAssignMsg
   | TaskResultMsg
+  | TaskFailureMsg
   | TaskProgressMsg
   | TestMsg
   | AckMsg
@@ -228,6 +235,10 @@ export function isTaskProgressMsg(msg: BaseMessage): msg is TaskProgressMsg {
   return msg.type === MessageType.TaskProgress;
 }
 
+export function isTaskFailureMsg(msg: BaseMessage): msg is TaskFailureMsg {
+  return msg.type === MessageType.TaskFailure;
+}
+
 export function isErrorMsg(msg: BaseMessage): msg is ErrorMsg {
   return msg.type === MessageType.Error;
 }
@@ -238,6 +249,10 @@ export function isDisconnectMsg(msg: BaseMessage): msg is DisconnectMsg {
 
 export function isAckMsg(msg: BaseMessage): msg is AckMsg {
   return msg.type === MessageType.Ack;
+}
+
+export function isTestMsg(msg: BaseMessage): msg is TestMsg {
+  return msg.type === MessageType.Test;
 }
 
 // --- Test and acknowledgement messages ---
