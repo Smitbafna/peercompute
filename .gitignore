@@ -1,5 +1,7 @@
 node_modules
 /.vite
-/dist
+/frontend/dist
+/shared/dist
+/signaling-server/dist
 *.log
 .env*
