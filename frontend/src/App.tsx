@@ -5,6 +5,8 @@ import {
   isRegistrationSuccessMsg,
   isErrorMsg,
   isWorkerDiscoveryResponseMsg,
+  isTestMsg,
+  isAckMsg,
 } from "peercompute-shared";
 import {
   WebRTCConnectionManager,
@@ -49,16 +51,50 @@ function App(): React.ReactNode {
   const [connectionState, setConnectionState] = useState<string>("---");
   const [error, setError] = useState<string>("");
   const [isRegistered, setIsRegistered] = useState(false);
+  const [testMessages, setTestMessages] = useState<string[]>([]);
+  const [acks, setAcks] = useState<string[]>([]);
+  const [sendMessageStatus, setSendMessageStatus] = useState<"pending" | "acknowledged" | "failed">("pending");
+  const [dataChannelState, setDataChannelState] = useState<string>("---");
+  const [workerClientId, setWorkerClientId] = useState<string>("");
+  const [coordinatorClientId, setCoordinatorClientId] = useState<string>("");
 
   const wsRef = useRef<WebSocket | null>(null);
   const managersRef = useRef<Map<string, WebRTCConnectionManager>>(new Map());
+  const messageInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     return () => {
       managersRef.current.forEach((m) => m.close());
       managersRef.current.clear();
     };
-  }, []);
+    // Listen for DataChannel events on each manager
+    managersRef.current.forEach((manager, clientId) => {
+      manager.on("connect", () => {
+        setDataChannelState("open");
+        setSendMessageStatus("pending");
+      });
+      manager.on("close", () => {
+        setDataChannelState("closed");
+        setSendMessageStatus("pending");
+      });
+      manager.on("message", ((data: string) => {
+        setTestMessages((prev) => [...prev, data]);
+        // Try to parse and send ack for test messages
+        try {
+          const parsed = JSON.parse(data);
+          if (parsed.type === "TEST") {
+            // Send acknowledgement
+            manager.send(JSON.stringify({
+              type: "ACK",
+              messageId: parsed.messageId,
+              timestamp: Date.now(),
+            }));
+            setTestMessages((prev) => [...prev, `Test: ${parsed.payload}`]);
+          }
+        } catch {}
+      }) as (...args: unknown[]) => void);
+    });
+  }, [managersRef]);
 
   const connectToServer = useCallback(() => {
     if (wsRef.current?.readyState === WebSocket.OPEN) {
@@ -167,6 +203,31 @@ function App(): React.ReactNode {
         timestamp: Date.now(),
       })
     );
+  };
+
+  const handleSendMessage = () => {
+    const input = messageInputRef.current;
+    if (!input || !input.value.trim()) return;
+    const messageText = input.value.trim();
+    
+    // Send through the DataChannel
+    const manager = managersRef.current.get(role === "coordinator" ? workerClientId : coordinatorClientId);
+    if (manager) {
+      try {
+        setSendMessageStatus("pending");
+        manager.send(messageText);
+        setSendMessageStatus("acknowledged");
+        // Clear input after a moment
+        setTimeout(() => {
+          setSendMessageStatus("pending");
+          input.value = "";
+        }, 2000);
+      } catch (error) {
+        setSendMessageStatus("failed");
+        console.error("Send failed:", error);
+        setTimeout(() => setSendMessageStatus("pending"), 2000);
+      }
+    }
   };
 
   const initiateConnection = useCallback(
@@ -408,6 +469,45 @@ function App(): React.ReactNode {
       </div>
       <div style={{ margin: "1rem 0", padding: "1rem", background: "#f5f5f5", borderRadius: "4px" }}>
         <strong>Discovery:</strong> {discoveryStatus}
+      </div>
+      <div style={{ margin: "1rem 0", padding: "1rem", background: "#f5f5f5", borderRadius: "4px" }}>
+        <strong>DataChannel:</strong> {dataChannelState}
+        <br />
+        <strong>Message Status:</strong> {sendMessageStatus}
+      </div>
+      {/* Messaging UI */}
+      <div style={{ marginTop: "1rem", padding: "0.5rem", background: "#e8f4fd", borderRadius: "4px", border: "1px solid #bfd8e0" }}>
+        <span>To: <strong>{role === "coordinator" ? "worker" : "coordinator"}</strong></span>
+        <input
+          type="text"
+          ref={messageInputRef}
+          placeholder="Type a test message..."
+          disabled={dataChannelState !== "open" || !isRegistered || !role}
+          style={{ marginRight: "0.5rem", padding: "0.2rem", fontSize: "0.8rem" }}
+        />
+        <button
+          onClick={handleSendMessage}
+          disabled={dataChannelState !== "open" || !isRegistered || !role || !messageInputRef.current?.value.trim()}
+          style={{ padding: "0.2rem 0.5rem", fontSize: "0.8rem" }}
+        >
+          Send
+        </button>
+      </div>
+      <div style={{ marginTop: "0.5rem" }}>
+        <strong>Sent messages:</strong>
+        <ul>
+          {testMessages.map((msg, i) => (
+            <li key={i}>{msg}</li>
+          ))}
+        </ul>
+      </div>
+      <div style={{ marginTop: "0.5rem" }}>
+        <strong>Received messages:</strong>
+        <ul>
+          {acks.map((msg, i) => (
+            <li key={i}>{msg}</li>
+          ))}
+        </ul>
       </div>
       {role === "coordinator" && coordinatorSection}
       {role === "worker" && workerSection}

@@ -28,6 +28,10 @@ export enum MessageType {
   TaskResult = "TASK_RESULT",
   TaskProgress = "TASK_PROGRESS",
 
+  // Test messages (Milestone 07)
+  Test = "TEST",
+  Ack = "ACK",
+
   // Error and control messages
   Error = "ERROR",
   Disconnect = "DISCONNECT"
@@ -167,6 +171,8 @@ export type AllMessages =
   | TaskAssignMsg
   | TaskResultMsg
   | TaskProgressMsg
+  | TestMsg
+  | AckMsg
   | ErrorMsg
   | DisconnectMsg;
 
@@ -228,4 +234,34 @@ export function isErrorMsg(msg: BaseMessage): msg is ErrorMsg {
 
 export function isDisconnectMsg(msg: BaseMessage): msg is DisconnectMsg {
   return msg.type === MessageType.Disconnect;
+}
+
+export function isTestMsg(msg: BaseMessage): msg is TestMsg {
+  return msg.type === MessageType.Test;
+}
+
+export function isAckMsg(msg: BaseMessage): msg is AckMsg {
+  return msg.type === MessageType.Ack;
+}
+
+// --- Test and acknowledgement messages ---
+
+export interface TestMsg extends ClientMessage {
+  type: MessageType.Test;
+  messageId: string; // UUID identifying this specific message
+  payload: unknown;
+}
+
+export interface AckMsg extends BaseMessage {
+  type: MessageType.Ack;
+  messageId: string; // The messageId being acknowledged
+}
+
+// Type guards
+export function isTestMsg(msg: BaseMessage): msg is TestMsg {
+  return msg.type === MessageType.Test;
+}
+
+export function isAckMsg(msg: BaseMessage): msg is AckMsg {
+  return msg.type === MessageType.Ack;
 }

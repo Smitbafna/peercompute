@@ -99,3 +99,5 @@ export function validateDiscoveryRequestMsg(
   if (!validateClientMessage(msg)) return false;
   return m.type === MessageType.WorkerDiscoveryRequest;
 }
+
+/**\n * Validates a test message.\n * Checks type discriminator, clientId (UUID), messageId (UUID), timestamp, and payload.\n */\nexport function validateTestMsg(msg: unknown): msg is TestMsg {\n  if (typeof msg !== "object" || msg === null) return false;\n  const m = msg as Record<string, unknown>;\n  if (!validateClientMessage(msg)) return false;\n  if (!isNonEmptyString(m.messageId)) return false;\n  if (!isValidUuid(m.messageId)) return false;\n  return true;\n}\n\n/**\n * Validates an acknowledgement message.\n * Checks type discriminator, messageId (UUID), and timestamp.\n */\nexport function validateAckMsg(msg: unknown): msg is AckMsg {\n  if (typeof msg !== "object" || msg === null) return false;\n  const m = msg as Record<string, unknown>;\n  if (!validateBaseMessage(msg)) return false;\n  if (!isNonEmptyString(m.messageId)) return false;\n  if (!isValidUuid(m.messageId)) return false;\n  return true;\n}\n

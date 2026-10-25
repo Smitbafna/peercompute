@@ -3,6 +3,10 @@
  */
 import {
   MessageType,
+  isTestMsg,
+  isAckMsg,
+  TestMsg,
+  AckMsg,
 } from "peercompute-shared";
 
 export interface BaseMessage {
