@@ -142,6 +142,31 @@ export interface TaskFailureMsg extends ClientMessage {
   errorMessage: string;
 }
 
+export interface SumRangeAssignMsg extends ClientMessage {
+  type: MessageType.TaskAssign;
+  taskId: string;
+  senderId: string;
+  receiverId: string;
+  taskType: "SUM_RANGE";
+  input: { start: number; end: number };
+}
+
+export interface SumRangeResultMsg extends ClientMessage {
+  type: MessageType.TaskResult;
+  taskId: string;
+  senderId: string;
+  receiverId: string;
+  result: number;
+}
+
+export interface SumRangeFailureMsg extends ClientMessage {
+  type: MessageType.TaskFailure;
+  taskId: string;
+  senderId: string;
+  receiverId: string;
+  error: string;
+}
+
 export interface TaskProgressMsg extends ClientMessage {
   type: MessageType.TaskProgress;
   taskId: string;
@@ -237,6 +262,18 @@ export function isTaskProgressMsg(msg: BaseMessage): msg is TaskProgressMsg {
 
 export function isTaskFailureMsg(msg: BaseMessage): msg is TaskFailureMsg {
   return msg.type === MessageType.TaskFailure;
+}
+
+export function isSumRangeAssignMsg(msg: BaseMessage): msg is SumRangeAssignMsg {
+  return msg.type === MessageType.TaskAssign && (msg as any).taskType === "SUM_RANGE";
+}
+
+export function isSumRangeResultMsg(msg: BaseMessage): msg is SumRangeResultMsg {
+  return msg.type === MessageType.TaskResult && (msg as any).taskType === "SUM_RANGE";
+}
+
+export function isSumRangeFailureMsg(msg: BaseMessage): msg is SumRangeFailureMsg {
+  return msg.type === MessageType.TaskFailure && (msg as any).taskType === "SUM_RANGE";
 }
 
 export function isErrorMsg(msg: BaseMessage): msg is ErrorMsg {

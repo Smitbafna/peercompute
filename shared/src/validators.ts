@@ -15,6 +15,9 @@ import {
   WorkerDiscoveryRequestMsg,
   TestMsg,
   AckMsg,
+  SumRangeAssignMsg,
+  SumRangeResultMsg,
+  SumRangeFailureMsg,
 } from "./messages";
 
 function isValidUuid(uuid: string): boolean {
@@ -125,5 +128,39 @@ export function validateAckMsg(msg: unknown): msg is AckMsg {
   if (!validateBaseMessage(msg)) return false;
   if (!isNonEmptyString(m.messageId)) return false;
   if (!isValidUuid(m.messageId)) return false;
+  return true;
+}
+
+/**\n * Validates a SUM_RANGE assign message.\n * Checks type discriminator, clientId (UUID), taskId, taskType, and input fields.\n */
+export function validateSumRangeAssignMsg(msg: unknown): msg is SumRangeAssignMsg {
+  if (typeof msg !== "object" || msg === null) return false;
+  const m = msg as Record<string, unknown>;
+  if (!validateClientMessage(msg)) return false;
+  if (m.taskType !== "SUM_RANGE") return false;
+  if (typeof m.taskId !== "string" || m.taskId.length === 0) return false;
+  if (typeof m.input !== "object" || m.input === null) return false;
+  const input = m.input as Record<string, unknown>;
+  if (typeof input.start !== "number" || !Number.isFinite(input.start)) return false;
+  if (typeof input.end !== "number" || !Number.isFinite(input.end)) return false;
+  return true;
+}
+
+/**\n * Validates a SUM_RANGE result message.\n * Checks type discriminator, clientId (UUID), taskId, and result field.\n */
+export function validateSumRangeResultMsg(msg: unknown): msg is SumRangeResultMsg {
+  if (typeof msg !== "object" || msg === null) return false;
+  const m = msg as Record<string, unknown>;
+  if (!validateClientMessage(msg)) return false;
+  if (typeof m.taskId !== "string" || m.taskId.length === 0) return false;
+  if (typeof m.result !== "number" || !Number.isFinite(m.result)) return false;
+  return true;
+}
+
+/**\n * Validates a SUM_RANGE failure message.\n * Checks type discriminator, clientId (UUID), taskId, and error message.\n */
+export function validateSumRangeFailureMsg(msg: unknown): msg is SumRangeFailureMsg {
+  if (typeof msg !== "object" || msg === null) return false;
+  const m = msg as Record<string, unknown>;
+  if (!validateClientMessage(msg)) return false;
+  if (typeof m.taskId !== "string" || m.taskId.length === 0) return false;
+  if (typeof m.error !== "string" || m.error.length === 0) return false;
   return true;
 }
