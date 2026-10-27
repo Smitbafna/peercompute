@@ -7,6 +7,9 @@ import {
   isWorkerDiscoveryResponseMsg,
   isTestMsg,
   isAckMsg,
+  isWebrtcOfferMsg,
+  isWebrtcAnswerMsg,
+  isWebrtcIceCandidateMsg,
 } from "peercompute-shared";
 import {
   WebRTCConnectionManager,
@@ -61,6 +64,10 @@ function App(): React.ReactNode {
   const wsRef = useRef<WebSocket | null>(null);
   const managersRef = useRef<Map<string, WebRTCConnectionManager>>(new Map());
   const messageInputRef = useRef<HTMLInputElement>(null);
+  // Always-reflect latest clientId so stale closures (e.g., ws.onmessage captured
+  // before clientId was set) can access the correct registered client ID.
+  const clientIdRef = useRef<string>("");
+  clientIdRef.current = clientId;
 
   useEffect(() => {
     return () => {
@@ -147,20 +154,95 @@ function App(): React.ReactNode {
       setIsRegistered(true);
       setWorkers([]);
 
-      // Automatically initiate WebRTC connection after registration
+      // Do NOT automatically initiate WebRTC connection after registration.
+      // The coordinator must explicitly click "Connect to Worker" to start peer connection.
       if (msg.role === "coordinator") {
-        // Coordinator initiates connection to a worker
-        // We'll use the first discovered worker or a default
-        const workerOptions = managersRef.current.get("worker-1");
-        if (!workerOptions) {
-          // Request worker list first, then initiate
-          requestWorkerList();
-        } else {
-          initiateConnection("worker-1");
-        }
+        // Just initialize empty worker list; discovery will be triggered by user action.
+        setConnectionState("---");
+        setDataChannelState("---");
       } else {
-        // Worker role: connection will be initiated by coordinator
         setConnectionState("waiting for coordinator");
+      }
+      return;
+    }
+
+    if (isWebrtcOfferMsg(msg)) {
+      // Handle incoming WebRTC offer from coordinator
+      setConnectionState("connecting");
+      const offerMsg = msg as WebrtcOfferMsg;
+      const manager = new WebRTCConnectionManager({
+        clientId: clientIdRef.current,
+        role: "worker",
+        send: (m: Record<string, unknown>) => {
+          if (wsRef.current?.readyState === WebSocket.OPEN) {
+            wsRef.current?.send(JSON.stringify(m));
+          }
+        },
+        receiverId: offerMsg.senderId,
+        createDataChannel: false,
+      });
+      managersRef.current.set(offerMsg.senderId, manager);
+      manager.on("connect", () => {
+        setConnectionState("connected to " + offerMsg.senderId);
+        setDataChannelState("open");
+      });
+      manager.on("statechange", () => {
+        const state = manager.getConnectionState();
+        if (state === "connected") {
+          setConnectionState("connected to " + offerMsg.senderId);
+          setDataChannelState("open");
+        } else if (state === "disconnected" || state === "closed" || state === "failed") {
+          setConnectionState("disconnected");
+          setDataChannelState("---");
+          managersRef.current.delete(offerMsg.senderId);
+        }
+      });
+      manager.on("close", () => {
+        setConnectionState("closed");
+        setDataChannelState("---");
+        managersRef.current.delete(offerMsg.senderId);
+      });
+      manager.on("failed", () => {
+        setConnectionState("failed");
+        setDataChannelState("---");
+        managersRef.current.delete(offerMsg.senderId);
+      });
+      // Create answer in response to the offer
+      manager.createAnswer({ type: "offer" as const, sdp: offerMsg.sdp }).then((answer) => {
+        wsRef.current?.send(
+          JSON.stringify({
+            type: MessageType.WebrtcAnswer,
+            senderId: clientIdRef.current,
+            receiverId: offerMsg.senderId,
+            sdp: answer.sdp,
+            timestamp: Date.now(),
+          })
+        );
+      }).catch((error) => {
+        console.error("Failed to create WebRTC answer:", error);
+      });
+      return;
+    }
+
+    if (isWebrtcAnswerMsg(msg)) {
+      // Handle incoming WebRTC answer
+      const answerMsg = msg as WebrtcAnswerMsg;
+      const manager = managersRef.current.get(answerMsg.senderId);
+      if (manager) {
+        manager.setRemoteDescription({
+          type: "answer" as const,
+          sdp: answerMsg.sdp,
+        });
+      }
+      return;
+    }
+
+    if (msg.type === MessageType.WebrtcIceCandidate) {
+      // Handle incoming ICE candidate
+      const iceMsg: any = msg;
+      const manager = managersRef.current.get(iceMsg.senderId);
+      if (manager && iceMsg.candidate) {
+        manager.addIceCandidate(iceMsg.candidate);
       }
       return;
     }
@@ -194,11 +276,12 @@ function App(): React.ReactNode {
       setWorkers(msg.workers || []);
       setDiscoveryStatus(`Available workers: ${msg.workers.length}`);
 
-      // Auto-initiate WebRTC connection to first worker after discovery
-      if (msg.workers.length > 0 && role === "coordinator") {
-        // Connect to first available worker
-        initiateConnection(msg.workers[0].clientId);
+      // Auto-set target worker to first available worker if none selected yet
+      if (msg.workers.length > 0 && !targetClientId.trim()) {
+        setTargetClientId(msg.workers[0].clientId);
       }
+      // Do NOT auto-initiate WebRTC connection here. The coordinator must
+      // explicitly click "Connect to Worker" to start peer connection.
       return;
     }
   };
@@ -220,8 +303,9 @@ function App(): React.ReactNode {
     wsRef.current.send(
       JSON.stringify({
         type: role === "coordinator" ? MessageType.CoordinatorRegister : MessageType.WorkerRegister,
-        clientId: clientId.trim(),
+        clientId: clientIdRef.current.trim(),
         role,
+        senderId: clientIdRef.current,
         timestamp: Date.now(),
       })
     );
@@ -232,76 +316,141 @@ function App(): React.ReactNode {
     if (!input || !input.value.trim()) return;
     const messageText = input.value.trim();
     
-    // Send through the DataChannel
-    const manager = managersRef.current.get(role === "coordinator" ? workerClientId : coordinatorClientId);
-    if (manager) {
-      try {
+    // Select the intended peer's manager based on role
+    const manager = managersRef.current.get(
+      targetClientId ? targetClientId : role === "coordinator" ? workerClientId : coordinatorClientId
+    );
+    if (!manager) {
+      setError("No connection to selected peer");
+      setSendMessageStatus("failed");
+      return;
+    }
+    if (manager.getIsClosed()) {
+      setError("Connection is closed");
+      setSendMessageStatus("failed");
+      return;
+    }
+    // Check the actual DataChannel readyState before sending
+    const dc =  (manager as any).dataChannel ;
+    if (dc === null || dc.readyState !== "open") {
+      setError("DataChannel is not open");
+      setSendMessageStatus("failed");
+      return;
+    }
+    try {
+      setSendMessageStatus("pending");
+      manager.send(messageText);
+      // Do not update UI to "acknowledged" yet - the remote receipt is confirmed
+      // by the onmessage handler below, not by local send success
+      setTimeout(() => {
         setSendMessageStatus("pending");
-        manager.send(messageText);
-        setSendMessageStatus("acknowledged");
-        // Clear input after a moment
-        setTimeout(() => {
-          setSendMessageStatus("pending");
-          input.value = "";
-        }, 2000);
-      } catch (error) {
-        setSendMessageStatus("failed");
-        console.error("Send failed:", error);
-        setTimeout(() => setSendMessageStatus("pending"), 2000);
-      }
+        input.value = "";
+      }, 2000);
+    } catch (error: any) {
+      setSendMessageStatus("failed");
+      console.error("Send failed:", error);
+      setTimeout(() => setSendMessageStatus("pending"), 2000);
     }
   };
 
   const initiateConnection = useCallback(
-    async (receiverId: string) => {
+    async (receiverId: string, connectionRole: "coordinator" | "worker") => {
+      console.log("initiateConnection called:", receiverId, connectionRole);
+      
+      // Log manager map state
+      const managerKeys = Array.from(managersRef.current.keys());
+      console.log("Manager map keys:", managerKeys)
+      // Close any existing connection to this receiver
+      const existing = managersRef.current.get(receiverId);
+      if (existing) {
+        existing.close();
+        managersRef.current.delete(receiverId);
+      }
+
       const options: ConnectionManagerOptions = {
-        clientId,
-        role: "worker",
+        clientId: clientIdRef.current,
+        role: connectionRole || "worker",
         send: (m: Record<string, unknown>) => {
+          console.log("WebRTC manager sending:", m.type, m);
           if (wsRef.current?.readyState === WebSocket.OPEN) {
             wsRef.current?.send(JSON.stringify(m));
+          } else {
+            console.error("WebSocket not open, cannot send:", m.type);
           }
         },
         receiverId,
+        createDataChannel: true,
       };
       const newManager = new WebRTCConnectionManager(options);
       managersRef.current.set(receiverId, newManager);
+      // Set the appropriate client ID state so that sendMessage can find the manager
+      if (connectionRole === "coordinator") {
+        setWorkerClientId(receiverId);
+      } else {
+        setCoordinatorClientId(receiverId);
+      }
       newManager.on("connect", () => {
-        setConnectionState("connected to " + receiverId);
-        setDataChannelState("open");
+        console.log("WebRTC connected to:", receiverId);
+        // The DataChannel open state will be confirmed by the onmessage/readyState events
+        // Don't unconditionally set global dataChannelState - let actual DataChannel events confirm it
       });
       newManager.on("statechange", () => {
-        setConnectionState("disconnected");
-        setDataChannelState("---");
+        const state = newManager.getConnectionState();
+        // Derive per-peer state from the manager's actual state
+        const isConnected = state === "connected";
+        // Only update the connection state display for this specific peer
+        if (isConnected) {
+          console.log("WebRTC connected to:", receiverId);
+          // Update only this peer's connection state
+          setConnectionState("connected to " + receiverId);
+          setDataChannelState("open");
+        } else if (state === "disconnected" || state === "closed" || state === "failed") {
+          console.log("WebRTC state change:", receiverId, state);
+          // Don't globally reset state - only affect this peer
+          // managersRef.current.delete(receiverId) already removes this manager
+        }
       });
       newManager.on("close", () => {
-        setConnectionState("closed");
+        console.log("WebRTC closed:", receiverId);
+        console.log("Manager map keys after close:", Array.from(managersRef.current.keys()));
+        // Only delete this manager, don't globally reset state
+        managersRef.current.delete(receiverId);
+        // Do NOT set global connectionState/dataChannelState here -
+        // let the per-peer state derive from actual DataChannel events
+      });
+      newManager.on("failed", () => {
+        console.error("WebRTC failed:", receiverId);
+        setConnectionState("failed");
         setDataChannelState("---");
         managersRef.current.delete(receiverId);
       });
-      newManager.on("failed", () => {
-        setConnectionState("failed");
-        setDataChannelState("---");
-      });
       try {
+        console.log("Creating offer...");
         const offer = await newManager.createOffer();
+        console.log("Offer created:", offer.sdp ? "yes" : "no");
+        // Set local description so the signaling state machine is valid
+        await newManager.setLocalDescription(offer);
         if (wsRef.current?.readyState === WebSocket.OPEN) {
           wsRef.current.send(
             JSON.stringify({
               type: MessageType.WebrtcOffer,
-              clientId,
-              senderId: clientId,
+              clientId: clientIdRef.current,
+              senderId: clientIdRef.current,
               receiverId,
               sdp: offer.sdp,
               timestamp: Date.now(),
             })
           );
+          console.log("WebRTC offer sent to:", receiverId);
+        } else {
+          console.error("WebSocket not open, cannot send offer");
         }
       } catch (err) {
         setError("Failed to create offer: " + (err as Error).message);
+        console.error("Offer creation failed:", err);
       }
     },
-    [clientId, isRegistered]
+    [clientId]
   );
 
   const handleWorkerOffer = (msg: WebrtcOfferMsg) => {
@@ -359,7 +508,8 @@ function App(): React.ReactNode {
     wsRef.current.send(
       JSON.stringify({
         type: MessageType.WorkerDiscoveryRequest,
-        clientId: clientId.trim(),
+        clientId: clientIdRef.current.trim(),
+        senderId: clientIdRef.current,
         timestamp: Date.now(),
       })
     );
@@ -372,9 +522,23 @@ function App(): React.ReactNode {
         <input
           value={targetClientId}
           onChange={(e) => setTargetClientId((e.target as HTMLInputElement).value)}
-        />{" "}
-        Connect to Worker
+          placeholder="Enter worker client ID"
+        />
       </label>
+      <button
+        onClick={() => {
+          console.log("Connect to Worker clicked, targetClientId:", targetClientId);
+          if (!targetClientId.trim()) {
+            setError("Enter a worker client ID");
+            return;
+          }
+          initiateConnection(targetClientId.trim(), "coordinator");
+        }}
+        disabled={!targetClientId.trim()}
+        style={{ marginLeft: "0.5rem", padding: "0.2rem 0.5rem", fontSize: "0.8rem" }}
+      >
+        Connect to Worker
+      </button>
       <br />
       <span>Connection state: <strong>{connectionState}</strong></span>
       <br />
@@ -382,7 +546,9 @@ function App(): React.ReactNode {
       <br />
       <ul>
         {workers.map((w) => (
-          <li key={w.clientId}>{w.clientId}</li>
+          <li key={w.clientId} style={{ cursor: "pointer" }} onClick={() => setTargetClientId(w.clientId)}>
+            {w.clientId}
+          </li>
         ))}
       </ul>
       <br />
@@ -509,17 +675,35 @@ function App(): React.ReactNode {
       </div>
       {/* Messaging UI */}
       <div style={{ marginTop: "1rem", padding: "0.5rem", background: "#e8f4fd", borderRadius: "4px", border: "1px solid #bfd8e0" }}>
-        <span>To: <strong>{role === "coordinator" ? "worker" : "coordinator"}</strong></span>
+        <span>To: </span>
+        {role === "coordinator" ? (
+          <select
+            value={targetClientId}
+            onChange={(e) => setTargetClientId(e.target.value)}
+            style={{ marginLeft: "0.5rem", padding: "0.2rem", fontSize: "0.8rem" }}
+          >
+            <option value="">Select worker</option>
+            {workers
+              .filter((w) => w.role === "worker")
+              .map((w) => (
+                <option key={w.clientId} value={w.clientId}>
+                  {w.clientId.substring(0, 8)}...
+                </option>
+              ))}
+          </select>
+        ) : (
+          <span>{coordinatorClientId.substring(0, 8)}...</span>
+        )}
         <input
           type="text"
           ref={messageInputRef}
           placeholder="Type a test message..."
-          disabled={dataChannelState !== "open" || !isRegistered || !role}
+          disabled={!isRegistered || !role || !targetClientId}
           style={{ marginRight: "0.5rem", padding: "0.2rem", fontSize: "0.8rem" }}
         />
         <button
           onClick={handleSendMessage}
-          disabled={dataChannelState !== "open" || !isRegistered || !role || !messageInputRef.current?.value.trim()}
+          disabled={dataChannelState !== "open" || !isRegistered || !role || !targetClientId || !messageInputRef.current?.value.trim()}
           style={{ padding: "0.2rem 0.5rem", fontSize: "0.8rem" }}
         >
           Send

@@ -231,7 +231,15 @@ export function handleSignalingMessage(
 
   try {
     recipient.ws.send(JSON.stringify(message));
-    console.log("WebRTC signaling message sent from " + sender.clientId + " to " + receiverId);
+    console.log(
+      "WebRTC signaling message sent from " +
+        sender.clientId +
+        " to " +
+        receiverId +
+        " [" +
+        message.type +
+        "]"
+    );
   } catch (error) {
     console.error("Failed to send WebRTC signaling message to recipient:", error);
     sendError(ws, "SEND_FAILED", "Failed to send WebRTC signaling message to recipient");

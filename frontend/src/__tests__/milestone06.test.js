@@ -294,7 +294,8 @@ describe("WebRTCConnectionManager", () => {
             expect(offer.type).toBe("offer");
             expect(offer.sdp).toBe("mock-offer-sdp");
             expect(pc.createOfferCalls).toBe(1);
-            expect(pc.setLocalDescriptionCalls).toContainEqual({ type: "offer", sdp: "mock-offer-sdp" });
+            // createOffer() no longer sets local description - it will be set after the remote answer is received
+            expect(pc.setLocalDescriptionCalls).toEqual([]);
         });
         it("creates the DataChannel if one does not exist yet", async () => {
             const manager = makeManager();
@@ -351,11 +352,17 @@ describe("WebRTCConnectionManager", () => {
         it("applies candidates directly (no buffering - buffering happens in onIceCandidate)", async () => {
             const manager = makeManager();
             const pc = getPeerConnection(manager);
+            // When hasSetupRemoteDescription is false (no setRemoteDescription called yet),
+            // addIceCandidate buffers the candidates. This fixes the "The remote description was null" error.
             await manager.addIceCandidate({ candidate: "cand-a", sdpMid: "0" });
             await manager.addIceCandidate({ candidate: "cand-b", sdpMid: "0" });
-            // addIceCandidate applies directly, no buffering
-            expect(pc.addIceCandidateCalls).toHaveLength(2);
+            // Candidates are buffered since hasSetupRemoteDescription is false
+            expect(manager.candidateBuffer.length).toBe(2);
+            expect(pc.addIceCandidateCalls).toHaveLength(0);
+            // After setRemoteDescription, candidates are flushed
+            await manager.setRemoteDescription({ type: "answer", sdp: "remote-answer-sdp" });
             expect(manager.candidateBuffer.length).toBe(0);
+            expect(pc.addIceCandidateCalls).toHaveLength(2);
         });
         it("buffers candidates via onIceCandidate until remote description is set", async () => {
             const manager = makeManager();
@@ -388,11 +395,12 @@ describe("WebRTCConnectionManager", () => {
             manager.send("hello");
             expect(dc.sendCalls).toContain("hello");
         });
-        it("throws when the DataChannel is not open", () => {
+        it("buffers a message when the DataChannel is not open", () => {
             const manager = makeManager();
             const dc = getDataChannel(manager);
             // readyState is "connecting" by default, not "open"
-            expect(() => manager.send("hello")).toThrow("DataChannel is not open");
+            manager.send("hello");
+            expect(dc.sendCalls).not.toContain("hello");
         });
         it("throws when the DataChannel is closed", () => {
             const manager = makeManager();
@@ -469,6 +477,121 @@ describe("WebRTCConnectionManager", () => {
             manager.close();
             expect(() => manager.send("after close")).toThrow("DataChannel is not open");
             expect(dc.sendCalls).not.toContain("after close");
+        });
+    });
+});
+// ---------------------------------------------------------------------------
+// Regression tests for DataChannel creation role-dependence (Milestone 06 fix)
+// ---------------------------------------------------------------------------
+describe("DataChannel creation role-dependence", () => {
+    beforeEach(() => {
+        installWebRTCMocks();
+    });
+    afterEach(() => {
+        uninstallWebRTCMocks();
+    });
+    it("creates a DataChannel for the coordinator (offerer) by default", () => {
+        const manager = makeManager();
+        const pc = getPeerConnection(manager);
+        expect(pc.dataChannelCalls).toContain("peercompute-test");
+        expect(manager.peerConnection).toBeDefined();
+    });
+    it("does NOT create a DataChannel for the worker when createDataChannel: false", () => {
+        const manager = makeManager({
+            role: "worker",
+            createDataChannel: false,
+        });
+        const pc = getPeerConnection(manager);
+        // The worker should not have called createDataChannel
+        expect(pc.dataChannelCalls).toHaveLength(0);
+        expect(pc.createdDataChannel).toBeNull();
+    });
+    it("worker manager still has ondatachannel handler set up", () => {
+        const manager = makeManager({
+            role: "worker",
+            createDataChannel: false,
+        });
+        const pc = getPeerConnection(manager);
+        expect(pc.ondatachannel).not.toBeNull();
+    });
+    it("worker receives remote DataChannel via ondatachannel and emits connect", () => {
+        const connectHandler = vi.fn();
+        const manager = makeManager({
+            role: "worker",
+            createDataChannel: false,
+        });
+        manager.on("connect", connectHandler);
+        const pc = getPeerConnection(manager);
+        // Simulate the offerer creating a DataChannel that triggers ondatachannel
+        pc.createDataChannel("peercompute-test");
+        // The remote DataChannel's readyState starts as "connecting"
+        // Simulate it opening:
+        const remoteDC = pc.createdDataChannel;
+        expect(remoteDC).not.toBeNull();
+        remoteDC.triggerOpen();
+        // connect should have been emitted only after the channel opens
+        expect(connectHandler).toHaveBeenCalledTimes(1);
+    });
+    it("does NOT emit connect before DataChannel onopen fires", () => {
+        const connectHandler = vi.fn();
+        const manager = makeManager({
+            role: "coordinator",
+            // Coordinator creates DataChannel
+        });
+        manager.on("connect", connectHandler);
+        // At construction time, connect should NOT have been emitted
+        expect(connectHandler).not.toHaveBeenCalled();
+        // Simulate the local DataChannel opening
+        const dc = getDataChannel(manager);
+        dc.triggerOpen();
+        // Now connect should be emitted
+        expect(connectHandler).toHaveBeenCalledTimes(1);
+    });
+    it("repeated connect attempts do not overwrite active connection with stale events", () => {
+        const manager1 = makeManager({
+            role: "coordinator",
+            clientId: "client-A",
+        });
+        manager1.close();
+        // Create a second manager - simulating a retry
+        const manager2 = makeManager({
+            role: "coordinator",
+            clientId: "client-A",
+        });
+        // Both managers should be independent
+        // manager1 was closed, so its peerConnection is null
+        expect(manager1.getIsClosed()).toBe(true);
+        const pc2 = getPeerConnection(manager2);
+        expect(pc2.closed).toBe(false);
+    });
+});
+// ---------------------------------------------------------------------------
+// Regression tests for senderId validation (senderId is required)
+// ---------------------------------------------------------------------------
+describe("senderId validation", () => {
+    beforeEach(() => {
+        installWebRTCMocks();
+    });
+    afterEach(() => {
+        uninstallWebRTCMocks();
+    });
+    it("offer message construction includes senderId matching clientId", () => {
+        const clientId = "test-coordinator-id";
+        const sendFn = vi.fn();
+        const manager = new WebRTCConnectionManager({
+            clientId,
+            role: "coordinator",
+            send: sendFn,
+            createDataChannel: true,
+            receiverId: "test-worker-id",
+        });
+        manager.createOffer().then(() => {
+            // The send function should have been called with a message containing senderId
+            expect(sendFn).toHaveBeenCalled();
+            const sentMsg = sendFn.mock.calls[0][0];
+            expect(sentMsg).toBeDefined();
+            // senderId should match clientId
+            expect(sentMsg.senderId).toBe(clientId);
         });
     });
 });

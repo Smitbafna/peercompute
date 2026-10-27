@@ -1,6 +1,6 @@
 import { jsx as _jsx, jsxs as _jsxs } from "react/jsx-runtime";
 import { useState, useRef, useCallback, useEffect } from "react";
-import { MessageType, isRegistrationSuccessMsg, isErrorMsg, isWorkerDiscoveryResponseMsg, } from "peercompute-shared";
+import { MessageType, isRegistrationSuccessMsg, isErrorMsg, isWorkerDiscoveryResponseMsg, isWebrtcOfferMsg, isWebrtcAnswerMsg, } from "peercompute-shared";
 import { WebRTCConnectionManager, processWebrtcOffer, processWebrtcAnswer, processWebrtcIceCandidate, } from "./lib/webrtc-connection-manager";
 function generateClientId() {
     if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
@@ -41,6 +41,10 @@ function App() {
     const wsRef = useRef(null);
     const managersRef = useRef(new Map());
     const messageInputRef = useRef(null);
+    // Always-reflect latest clientId so stale closures (e.g., ws.onmessage captured
+    // before clientId was set) can access the correct registered client ID.
+    const clientIdRef = useRef("");
+    clientIdRef.current = clientId;
     useEffect(() => {
         return () => {
             managersRef.current.forEach((m) => m.close());
@@ -121,22 +125,92 @@ function App() {
             setRole(msg.role);
             setIsRegistered(true);
             setWorkers([]);
-            // Automatically initiate WebRTC connection after registration
+            // Do NOT automatically initiate WebRTC connection after registration.
+            // The coordinator must explicitly click "Connect to Worker" to start peer connection.
             if (msg.role === "coordinator") {
-                // Coordinator initiates connection to a worker
-                // We'll use the first discovered worker or a default
-                const workerOptions = managersRef.current.get("worker-1");
-                if (!workerOptions) {
-                    // Request worker list first, then initiate
-                    requestWorkerList();
-                }
-                else {
-                    initiateConnection("worker-1");
-                }
+                // Just initialize empty worker list; discovery will be triggered by user action.
+                setConnectionState("---");
+                setDataChannelState("---");
             }
             else {
-                // Worker role: connection will be initiated by coordinator
                 setConnectionState("waiting for coordinator");
+            }
+            return;
+        }
+        if (isWebrtcOfferMsg(msg)) {
+            // Handle incoming WebRTC offer from coordinator
+            setConnectionState("connecting");
+            const offerMsg = msg;
+            const manager = new WebRTCConnectionManager({
+                clientId: clientIdRef.current,
+                role: "worker",
+                send: (m) => {
+                    if (wsRef.current?.readyState === WebSocket.OPEN) {
+                        wsRef.current?.send(JSON.stringify(m));
+                    }
+                },
+                receiverId: offerMsg.senderId,
+                createDataChannel: false,
+            });
+            managersRef.current.set(offerMsg.senderId, manager);
+            manager.on("connect", () => {
+                setConnectionState("connected to " + offerMsg.senderId);
+                setDataChannelState("open");
+            });
+            manager.on("statechange", () => {
+                const state = manager.getConnectionState();
+                if (state === "connected") {
+                    setConnectionState("connected to " + offerMsg.senderId);
+                    setDataChannelState("open");
+                }
+                else if (state === "disconnected" || state === "closed" || state === "failed") {
+                    setConnectionState("disconnected");
+                    setDataChannelState("---");
+                    managersRef.current.delete(offerMsg.senderId);
+                }
+            });
+            manager.on("close", () => {
+                setConnectionState("closed");
+                setDataChannelState("---");
+                managersRef.current.delete(offerMsg.senderId);
+            });
+            manager.on("failed", () => {
+                setConnectionState("failed");
+                setDataChannelState("---");
+                managersRef.current.delete(offerMsg.senderId);
+            });
+            // Create answer in response to the offer
+            manager.createAnswer({ type: "offer", sdp: offerMsg.sdp }).then((answer) => {
+                wsRef.current?.send(JSON.stringify({
+                    type: MessageType.WebrtcAnswer,
+                    senderId: clientIdRef.current,
+                    receiverId: offerMsg.senderId,
+                    sdp: answer.sdp,
+                    timestamp: Date.now(),
+                }));
+            }).catch((error) => {
+                console.error("Failed to create WebRTC answer:", error);
+            });
+            return;
+        }
+        if (isWebrtcAnswerMsg(msg)) {
+            // Handle incoming WebRTC answer
+            const answerMsg = msg;
+            const manager = managersRef.current.get(answerMsg.senderId);
+            if (manager) {
+                manager.setRemoteDescription({
+                    type: "answer",
+                    sdp: answerMsg.sdp,
+                });
+            }
+            return;
+        }
+        if (msg.type === MessageType.WebrtcIceCandidate) {
+            // Handle incoming ICE candidate
+            const iceMsg = msg;
+            const manager = managersRef.current.get(iceMsg.senderId);
+            if (manager && iceMsg.candidate) {
+                manager.addIceCandidate(iceMsg.candidate);
             }
             return;
         }
@@ -167,11 +241,12 @@ function App() {
         if (isWorkerDiscoveryResponseMsg(msg)) {
             setWorkers(msg.workers || []);
             setDiscoveryStatus(`Available workers: ${msg.workers.length}`);
-            // Auto-initiate WebRTC connection to first worker after discovery
-            if (msg.workers.length > 0 && role === "coordinator") {
-                // Connect to first available worker
-                initiateConnection(msg.workers[0].clientId);
+            // Auto-set target worker to first available worker if none selected yet
+            if (msg.workers.length > 0 && !targetClientId.trim()) {
+                setTargetClientId(msg.workers[0].clientId);
             }
+            // Do NOT auto-initiate WebRTC connection here. The coordinator must
+            // explicitly click "Connect to Worker" to start peer connection.
             return;
         }
     };
@@ -190,8 +265,9 @@ function App() {
         }
         wsRef.current.send(JSON.stringify({
             type: role === "coordinator" ? MessageType.CoordinatorRegister : MessageType.WorkerRegister,
-            clientId: clientId.trim(),
+            clientId: clientIdRef.current.trim(),
             role,
+            senderId: clientIdRef.current,
             timestamp: Date.now(),
         }));
     };
@@ -200,73 +276,138 @@ function App() {
         if (!input || !input.value.trim())
             return;
         const messageText = input.value.trim();
-        // Send through the DataChannel
-        const manager = managersRef.current.get(role === "coordinator" ? workerClientId : coordinatorClientId);
-        if (manager) {
-            try {
+        // Select the intended peer's manager based on role
+        const manager = managersRef.current.get(targetClientId ? targetClientId : role === "coordinator" ? workerClientId : coordinatorClientId);
+        if (!manager) {
+            setError("No connection to selected peer");
+            setSendMessageStatus("failed");
+            return;
+        }
+        if (manager.getIsClosed()) {
+            setError("Connection is closed");
+            setSendMessageStatus("failed");
+            return;
+        }
+        // Check the actual DataChannel readyState before sending
+        const dc = manager.dataChannel;
+        if (dc === null || dc.readyState !== "open") {
+            setError("DataChannel is not open");
+            setSendMessageStatus("failed");
+            return;
+        }
+        try {
+            setSendMessageStatus("pending");
+            manager.send(messageText);
+            // Do not update UI to "acknowledged" yet - the remote receipt is confirmed
+            // by the onmessage handler below, not by local send success
+            setTimeout(() => {
                 setSendMessageStatus("pending");
-                manager.send(messageText);
-                setSendMessageStatus("acknowledged");
-                // Clear input after a moment
-                setTimeout(() => {
-                    setSendMessageStatus("pending");
-                    input.value = "";
-                }, 2000);
-            }
-            catch (error) {
-                setSendMessageStatus("failed");
-                console.error("Send failed:", error);
-                setTimeout(() => setSendMessageStatus("pending"), 2000);
-            }
+                input.value = "";
+            }, 2000);
+        }
+        catch (error) {
+            setSendMessageStatus("failed");
+            console.error("Send failed:", error);
+            setTimeout(() => setSendMessageStatus("pending"), 2000);
         }
     };
-    const initiateConnection = useCallback(async (receiverId) => {
+    const initiateConnection = useCallback(async (receiverId, connectionRole) => {
+        console.log("initiateConnection called:", receiverId, connectionRole);
+        // Log manager map state
+        const managerKeys = Array.from(managersRef.current.keys());
+        console.log("Manager map keys:", managerKeys);
+        // Close any existing connection to this receiver
+        const existing = managersRef.current.get(receiverId);
+        if (existing) {
+            existing.close();
+            managersRef.current.delete(receiverId);
+        }
         const options = {
-            clientId,
-            role: "worker",
+            clientId: clientIdRef.current,
+            role: connectionRole || "worker",
             send: (m) => {
+                console.log("WebRTC manager sending:", m.type, m);
                 if (wsRef.current?.readyState === WebSocket.OPEN) {
                     wsRef.current?.send(JSON.stringify(m));
                 }
+                else {
+                    console.error("WebSocket not open, cannot send:", m.type);
+                }
             },
             receiverId,
+            createDataChannel: true,
         };
         const newManager = new WebRTCConnectionManager(options);
         managersRef.current.set(receiverId, newManager);
+        // Set the appropriate client ID state so that sendMessage can find the manager
+        if (connectionRole === "coordinator") {
+            setWorkerClientId(receiverId);
+        }
+        else {
+            setCoordinatorClientId(receiverId);
+        }
         newManager.on("connect", () => {
-            setConnectionState("connected to " + receiverId);
-            setDataChannelState("open");
+            console.log("WebRTC connected to:", receiverId);
+            // The DataChannel open state will be confirmed by the onmessage/readyState events
+            // Don't unconditionally set global dataChannelState - let actual DataChannel events confirm it
         });
         newManager.on("statechange", () => {
-            setConnectionState("disconnected");
-            setDataChannelState("---");
+            const state = newManager.getConnectionState();
+            // Derive per-peer state from the manager's actual state
+            const isConnected = state === "connected";
+            // Only update the connection state display for this specific peer
+            if (isConnected) {
+                console.log("WebRTC connected to:", receiverId);
+                // Update only this peer's connection state
+                setConnectionState("connected to " + receiverId);
+                setDataChannelState("open");
+            }
+            else if (state === "disconnected" || state === "closed" || state === "failed") {
+                console.log("WebRTC state change:", receiverId, state);
+                // Don't globally reset state - only affect this peer
+                // managersRef.current.delete(receiverId) already removes this manager
+            }
         });
         newManager.on("close", () => {
-            setConnectionState("closed");
+            console.log("WebRTC closed:", receiverId);
+            console.log("Manager map keys after close:", Array.from(managersRef.current.keys()));
+            // Only delete this manager, don't globally reset state
+            managersRef.current.delete(receiverId);
+            // Do NOT set global connectionState/dataChannelState here -
+            // let the per-peer state derive from actual DataChannel events
+        });
+        newManager.on("failed", () => {
+            console.error("WebRTC failed:", receiverId);
+            setConnectionState("failed");
             setDataChannelState("---");
             managersRef.current.delete(receiverId);
         });
-        newManager.on("failed", () => {
-            setConnectionState("failed");
-            setDataChannelState("---");
-        });
         try {
+            console.log("Creating offer...");
             const offer = await newManager.createOffer();
+            console.log("Offer created:", offer.sdp ? "yes" : "no");
+            // Set local description so the signaling state machine is valid
+            await newManager.setLocalDescription(offer);
             if (wsRef.current?.readyState === WebSocket.OPEN) {
                 wsRef.current.send(JSON.stringify({
                     type: MessageType.WebrtcOffer,
-                    clientId,
-                    senderId: clientId,
+                    clientId: clientIdRef.current,
+                    senderId: clientIdRef.current,
                     receiverId,
                     sdp: offer.sdp,
                     timestamp: Date.now(),
                 }));
+                console.log("WebRTC offer sent to:", receiverId);
+            }
+            else {
+                console.error("WebSocket not open, cannot send offer");
             }
         }
         catch (err) {
             setError("Failed to create offer: " + err.message);
+            console.error("Offer creation failed:", err);
         }
-    }, [clientId, isRegistered]);
+    }, [clientId]);
     const handleWorkerOffer = (msg) => {
         const receiverId = msg.senderId;
         const manager = managersRef.current.get(receiverId);
@@ -318,11 +459,19 @@ function App() {
         }
         wsRef.current.send(JSON.stringify({
             type: MessageType.WorkerDiscoveryRequest,
-            clientId: clientId.trim(),
+            clientId: clientIdRef.current.trim(),
+            senderId: clientIdRef.current,
             timestamp: Date.now(),
         }));
     }, [isRegistered, role, clientId]);
-    const coordinatorSection = (_jsxs("div", { children: [_jsxs("label", { children: ["Target Worker Client ID:", _jsx("input", { value: targetClientId, onChange: (e) => setTargetClientId(e.target.value) }), " ", "Connect to Worker"] }), _jsx("br", {}), _jsxs("span", { children: ["Connection state: ", _jsx("strong", { children: connectionState })] }), _jsx("br", {}), _jsxs("span", { children: ["Discovery: ", _jsx("strong", { children: discoveryStatus })] }), _jsx("br", {}), _jsx("ul", { children: workers.map((w) => (_jsx("li", { children: w.clientId }, w.clientId))) }), _jsx("br", {}), _jsxs("span", { children: ["Errors: ", _jsx("strong", { children: error || "none" })] })] }, "coordinator"));
+    const coordinatorSection = (_jsxs("div", { children: [_jsxs("label", { children: ["Target Worker Client ID:", _jsx("input", { value: targetClientId, onChange: (e) => setTargetClientId(e.target.value), placeholder: "Enter worker client ID" })] }), _jsx("button", { onClick: () => {
+                    console.log("Connect to Worker clicked, targetClientId:", targetClientId);
+                    if (!targetClientId.trim()) {
+                        setError("Enter a worker client ID");
+                        return;
+                    }
+                    initiateConnection(targetClientId.trim(), "coordinator");
+                }, disabled: !targetClientId.trim(), style: { marginLeft: "0.5rem", padding: "0.2rem 0.5rem", fontSize: "0.8rem" }, children: "Connect to Worker" }), _jsx("br", {}), _jsxs("span", { children: ["Connection state: ", _jsx("strong", { children: connectionState })] }), _jsx("br", {}), _jsxs("span", { children: ["Discovery: ", _jsx("strong", { children: discoveryStatus })] }), _jsx("br", {}), _jsx("ul", { children: workers.map((w) => (_jsx("li", { style: { cursor: "pointer" }, onClick: () => setTargetClientId(w.clientId), children: w.clientId }, w.clientId))) }), _jsx("br", {}), _jsxs("span", { children: ["Errors: ", _jsx("strong", { children: error || "none" })] })] }, "coordinator"));
     const workerSection = (_jsxs("div", { children: [_jsx("p", { children: "Waiting for coordinator to initiate connection..." }), _jsx("button", { onClick: () => window.location.reload(), children: "Refresh" })] }, "worker"));
     const unauthSection = (_jsxs("div", { children: [_jsxs("div", { children: [_jsxs("label", { children: ["Client ID:", _jsx("input", { value: clientId, onChange: (e) => setClientId(e.target.value), placeholder: "Click Generate ID for a random UUID", disabled: isRegistered })] }), _jsx("button", { style: { marginLeft: "0.5rem" }, onClick: () => setClientId(generateClientId()), disabled: !!clientId || isRegistered, children: "Generate ID" })] }), _jsx("div", { children: _jsxs("label", { children: ["Role:", _jsxs("select", { value: role ?? "", onChange: (e) => setRole(e.target.value === "" ? null : e.target.value), disabled: isRegistered, children: [_jsx("option", { value: "", children: "Select role" }), _jsx("option", { value: "coordinator", children: "Coordinator" }), _jsx("option", { value: "worker", children: "Worker" })] })] }) }), _jsx("button", { onClick: connectToServer, disabled: serverStatus === "connected", children: serverStatus === "connected" ? "Disconnect" : "Connect to Signaling Server" }), _jsx("button", { onClick: handleRegister, disabled: serverStatus !== "connected" || !clientId.trim() || !role || isRegistered, children: "Register Client" }), _jsx("div", { style: { marginTop: "0.5rem" }, children: _jsxs("label", { children: [_jsx("input", { type: "checkbox", checked: isRegistered, onChange: () => {
                                 if (!isRegistered) {
@@ -336,6 +485,8 @@ function App() {
                             wsRef.current.close();
                         }
                     }, disabled: wsRef.current?.readyState === WebSocket.CLOSED, children: "Disconnect" }) }), _jsxs("div", { children: ["Errors: ", _jsx("strong", { children: error || "none" })] })] }, "unauth"));
-    return (_jsxs("div", { style: { padding: "2rem", fontFamily: "sans-serif" }, children: [_jsx("h3", { children: "PeerCompute - Milestone 05: Client Registration & Peer Discovery" }), _jsxs("div", { children: [_jsxs("span", { children: ["Server: ", _jsx("strong", { children: serverStatus })] }), _jsx("br", {}), _jsxs("span", { children: ["Role: ", _jsx("strong", { children: role || "not set" })] }), _jsx("br", {}), _jsxs("span", { children: ["Client ID: ", _jsx("strong", { children: clientId || "---" })] })] }), _jsxs("div", { style: { margin: "1rem 0", padding: "1rem", background: "#f5f5f5", borderRadius: "4px" }, children: [_jsx("strong", { children: "Connection:" }), " ", serverStatus] }), _jsxs("div", { style: { margin: "1rem 0", padding: "1rem", background: "#f5f5f5", borderRadius: "4px" }, children: [_jsx("strong", { children: "Registration:" }), " ", registrationStatus] }), _jsxs("div", { style: { margin: "1rem 0", padding: "1rem", background: "#f5f5f5", borderRadius: "4px" }, children: [_jsx("strong", { children: "Discovery:" }), " ", discoveryStatus] }), _jsxs("div", { style: { margin: "1rem 0", padding: "1rem", background: "#f5f5f5", borderRadius: "4px" }, children: [_jsx("strong", { children: "DataChannel:" }), " ", dataChannelState, _jsx("br", {}), _jsx("strong", { children: "Message Status:" }), " ", sendMessageStatus] }), _jsxs("div", { style: { marginTop: "1rem", padding: "0.5rem", background: "#e8f4fd", borderRadius: "4px", border: "1px solid #bfd8e0" }, children: [_jsxs("span", { children: ["To: ", _jsx("strong", { children: role === "coordinator" ? "worker" : "coordinator" })] }), _jsx("input", { type: "text", ref: messageInputRef, placeholder: "Type a test message...", disabled: dataChannelState !== "open" || !isRegistered || !role, style: { marginRight: "0.5rem", padding: "0.2rem", fontSize: "0.8rem" } }), _jsx("button", { onClick: handleSendMessage, disabled: dataChannelState !== "open" || !isRegistered || !role || !messageInputRef.current?.value.trim(), style: { padding: "0.2rem 0.5rem", fontSize: "0.8rem" }, children: "Send" })] }), _jsxs("div", { style: { marginTop: "0.5rem" }, children: [_jsx("strong", { children: "Sent messages:" }), _jsx("ul", { children: testMessages.map((msg, i) => (_jsx("li", { children: msg }, i))) })] }), _jsxs("div", { style: { marginTop: "0.5rem" }, children: [_jsx("strong", { children: "Received messages:" }), _jsx("ul", { children: acks.map((msg, i) => (_jsx("li", { children: msg }, i))) })] }), role === "coordinator" && coordinatorSection, role === "worker" && workerSection, !isRegistered && unauthSection] }));
+    return (_jsxs("div", { style: { padding: "2rem", fontFamily: "sans-serif" }, children: [_jsx("h3", { children: "PeerCompute - Milestone 05: Client Registration & Peer Discovery" }), _jsxs("div", { children: [_jsxs("span", { children: ["Server: ", _jsx("strong", { children: serverStatus })] }), _jsx("br", {}), _jsxs("span", { children: ["Role: ", _jsx("strong", { children: role || "not set" })] }), _jsx("br", {}), _jsxs("span", { children: ["Client ID: ", _jsx("strong", { children: clientId || "---" })] })] }), _jsxs("div", { style: { margin: "1rem 0", padding: "1rem", background: "#f5f5f5", borderRadius: "4px" }, children: [_jsx("strong", { children: "Connection:" }), " ", serverStatus] }), _jsxs("div", { style: { margin: "1rem 0", padding: "1rem", background: "#f5f5f5", borderRadius: "4px" }, children: [_jsx("strong", { children: "Registration:" }), " ", registrationStatus] }), _jsxs("div", { style: { margin: "1rem 0", padding: "1rem", background: "#f5f5f5", borderRadius: "4px" }, children: [_jsx("strong", { children: "Discovery:" }), " ", discoveryStatus] }), _jsxs("div", { style: { margin: "1rem 0", padding: "1rem", background: "#f5f5f5", borderRadius: "4px" }, children: [_jsx("strong", { children: "DataChannel:" }), " ", dataChannelState, _jsx("br", {}), _jsx("strong", { children: "Message Status:" }), " ", sendMessageStatus] }), _jsxs("div", { style: { marginTop: "1rem", padding: "0.5rem", background: "#e8f4fd", borderRadius: "4px", border: "1px solid #bfd8e0" }, children: [_jsx("span", { children: "To: " }), role === "coordinator" ? (_jsxs("select", { value: targetClientId, onChange: (e) => setTargetClientId(e.target.value), style: { marginLeft: "0.5rem", padding: "0.2rem", fontSize: "0.8rem" }, children: [_jsx("option", { value: "", children: "Select worker" }), workers
+                                .filter((w) => w.role === "worker")
+                                .map((w) => (_jsxs("option", { value: w.clientId, children: [w.clientId.substring(0, 8), "..."] }, w.clientId)))] })) : (_jsxs("span", { children: [coordinatorClientId.substring(0, 8), "..."] })), _jsx("input", { type: "text", ref: messageInputRef, placeholder: "Type a test message...", disabled: !isRegistered || !role || !targetClientId, style: { marginRight: "0.5rem", padding: "0.2rem", fontSize: "0.8rem" } }), _jsx("button", { onClick: handleSendMessage, disabled: dataChannelState !== "open" || !isRegistered || !role || !targetClientId || !messageInputRef.current?.value.trim(), style: { padding: "0.2rem 0.5rem", fontSize: "0.8rem" }, children: "Send" })] }), _jsxs("div", { style: { marginTop: "0.5rem" }, children: [_jsx("strong", { children: "Sent messages:" }), _jsx("ul", { children: testMessages.map((msg, i) => (_jsx("li", { children: msg }, i))) })] }), _jsxs("div", { style: { marginTop: "0.5rem" }, children: [_jsx("strong", { children: "Received messages:" }), _jsx("ul", { children: acks.map((msg, i) => (_jsx("li", { children: msg }, i))) })] }), role === "coordinator" && coordinatorSection, role === "worker" && workerSection, !isRegistered && unauthSection] }));
 }
 export default App;

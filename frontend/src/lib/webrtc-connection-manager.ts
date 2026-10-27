@@ -55,6 +55,7 @@ export interface ConnectionManagerOptions {
   send: (msg: Record<string, unknown>) => void;
   iceServers?: RTCIceServer[];
   receiverId?: string;
+  createDataChannel?: boolean;
 }
 
 export interface DataChannelEventMap {
@@ -163,6 +164,11 @@ export class WebRTCConnectionManager extends EventEmitter {
       : "closed";
   }
 
+  /** Returns whether the connection manager is closed. */
+  getIsClosed(): boolean {
+    return this.isClosed;
+  }
+
   getSignalingState(): RTCSignalingState {
     return this.peerConnection
       ? this.peerConnection.signalingState
@@ -246,7 +252,8 @@ export class WebRTCConnectionManager extends EventEmitter {
       offerToReceiveVideo: false,
       offerToReceiveAudio: false,
     });
-    await this.peerConnection.setLocalDescription(offer);
+    // Do NOT set local description here - it will be set after the remote answer is received.
+    // This ensures the proper WebRTC signaling flow: remote sets remote desc first.
     this.flushBufferedCandidates();
     return offer;
   }
@@ -271,6 +278,16 @@ export class WebRTCConnectionManager extends EventEmitter {
       throw new Error("Peer connection not initialized");
     }
     await this.peerConnection.setRemoteDescription(desc);
+    this.hasSetupRemoteDescription = true;
+    this.flushBufferedCandidates();
+  }
+
+  /** Set the local description for the peer connection. */
+  async setLocalDescription(desc: RTCSessionDescriptionInit): Promise<void> {
+    if (!this.peerConnection) {
+      throw new Error("Peer connection not initialized");
+    }
+    await this.peerConnection.setLocalDescription(desc);
     this.hasSetupRemoteDescription = true;
     this.flushBufferedCandidates();
   }
@@ -341,6 +358,11 @@ export class WebRTCConnectionManager extends EventEmitter {
   addIceCandidate(candidate: RTCIceCandidateInit): Promise<void> {
     if (!this.peerConnection) {
       return Promise.reject(new Error("Peer connection not initialized"));
+    }
+    // Buffer ICE candidate if remote description hasn't been set yet
+    if (!this.hasSetupRemoteDescription) {
+      this.candidateBuffer.push({ candidate } as IcefEvent);
+      return Promise.resolve();
     }
     return this.peerConnection.addIceCandidate(candidate).catch((error) => {
       console.error("Failed to add ICE candidate:", error);
